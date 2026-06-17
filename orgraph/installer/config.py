@@ -2,9 +2,63 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from orgraph.installer.agents import Action, ORGRAPH_END, ORGRAPH_START, _resolve_orgraph_bin
+
+
+# ── Claude Code CLI helpers ───────────────────────────────────────────────────
+
+def _claude_bin() -> str | None:
+    return shutil.which("claude")
+
+
+def claude_mcp_add(name: str, command: str, args: list[str], scope: str = "user") -> Action:
+    """Register an MCP server via `claude mcp add` so Claude Code owns the config."""
+    claude = _claude_bin()
+    if not claude:
+        return "error"
+    result = subprocess.run(
+        [claude, "mcp", "add", "-s", scope, name, command, *args],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return "error"
+    return "created"
+
+
+def claude_mcp_remove(name: str, scope: str = "user") -> Action:
+    """Remove an MCP server via `claude mcp remove`."""
+    claude = _claude_bin()
+    if not claude:
+        return "error"
+    result = subprocess.run(
+        [claude, "mcp", "remove", "-s", scope, name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return "not-found"
+    return "removed"
+
+
+def _remove_stale_project_scoped(path: Path) -> None:
+    """Remove any project-scoped orgraph entries left by older installs.
+
+    Uses direct JSON edit because `claude mcp remove -s local` would need
+    to be run from each project's directory individually.
+    """
+    data = _read_json(path)
+    changed = False
+    for proj_val in data.get("projects", {}).values():
+        mcp = proj_val.get("mcpServers", {})
+        for key in ("orgraph", "orgraph-sync"):
+            if key in mcp:
+                del mcp[key]
+                changed = True
+    if changed:
+        _write_json(path, data)
 
 
 # ── JSON helpers ─────────────────────────────────────────────────────────────

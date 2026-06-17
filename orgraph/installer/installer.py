@@ -20,6 +20,9 @@ from orgraph.installer.agents import (
 )
 from orgraph.installer.config import (
     _bake_repo_path,
+    _remove_stale_project_scoped,
+    claude_mcp_add,
+    claude_mcp_remove,
     merge_claude_mcp,
     merge_json_mcp,
     merge_toml_mcp,
@@ -64,12 +67,15 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
     if key == "mcp_servers":  # TOML (Codex)
         action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
     elif agent.id == "claude":
-        # Claude Code: write to global mcpServers (like semble).
-        # Also removes any stale project-scoped entries to avoid scope conflicts.
+        # Use `claude mcp add/remove` so Claude Code owns the config format.
+        # Also wipe stale project-scoped entries to prevent scope conflicts.
+        bin_ = entry["command"] if isinstance(entry.get("command"), str) else str(entry.get("command", ""))
+        args_ = [a for a in entry.get("args", []) if isinstance(a, str)]
         if mode == "install":
-            action = merge_json_mcp(path, key, entry, remove_project_scoped=True)
+            _remove_stale_project_scoped(path)
+            action = claude_mcp_add("orgraph", bin_, args_, scope="user")
         else:
-            action = remove_json_mcp(path, key)
+            action = claude_mcp_remove("orgraph", scope="user")
     elif mode == "install":
         # Bake abs repo path into args for all other agents too (replaces "." placeholder)
         baked = _bake_repo_path(entry, repo_path) if repo_path else entry
