@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.18 - 2026-06-17
+
+### Changed
+- `orgraph install` now writes agent-specific instruction blocks: `CLAUDE_MD_BLOCK` for Claude Code (includes ToolSearch step), `AGENTS_MD_BLOCK` for Codex/Gemini/Opencode (no ToolSearch — tools load automatically). Previously all agents got the Claude-specific ToolSearch instruction which was irrelevant to them.
+
 ## 0.1.17 - 2026-06-17
 
 ### Changed
