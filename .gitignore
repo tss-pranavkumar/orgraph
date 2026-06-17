@@ -21,3 +21,4 @@ build/
 # Editor
 .DS_Store
 *.swp
+.codes/
