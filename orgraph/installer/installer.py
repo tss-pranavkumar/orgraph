@@ -10,6 +10,7 @@ import questionary
 
 from orgraph.installer.agents import (
     AGENTS,
+    AGENTS_MD_BLOCK,
     CLAUDE_MD_BLOCK,
     Action,
     AgentTarget,
@@ -89,7 +90,8 @@ def _apply_instructions(agent: AgentTarget, mode: Mode, repo_path: Path | None =
     if agent.instructions_path is None:
         return None
     path = agent.instructions_path
-    action = upsert_instructions(path, CLAUDE_MD_BLOCK) if mode == "install" else remove_instructions(path)
+    block = CLAUDE_MD_BLOCK if agent.id == "claude" else AGENTS_MD_BLOCK
+    action = upsert_instructions(path, block) if mode == "install" else remove_instructions(path)
     return WriteResult(path, action)
 
 

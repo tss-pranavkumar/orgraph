@@ -49,39 +49,56 @@ def get_opencode_mcp_entry() -> dict[str, object]:
 _MCP_ENTRY: dict[str, object] = {"command": "uvx", "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "stdio"}
 _OPENCODE_MCP_ENTRY: dict[str, object] = {"command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "local", "enabled": True}
 
+_ORGRAPH_TOOLS_TABLE = """\
+Always pass `repo` as the absolute path to the current project (the git root) with every call.
+
+Use these tools instead of grep/find/Read:
+
+| Instead of | Use |
+|---|---|
+| `grep -r "foo"` or `find` | `search(query, repo)` — semantic + keyword search |
+| Reading files to trace calls | `trace(symbol, repo)` — follows call chains in the graph |
+| Guessing what a file does | `get_context(file_or_symbol, repo)` — cluster, depth, indegree |
+| Listing API endpoints | `find_entry_points(kind="http", repo)` — HTTP handlers, CLI entry points |
+| Checking imports manually | `get_dependencies(file_path, repo)` — import/call dependency tree |
+
+When to use each:
+- **Where is X implemented?** → `search`
+- **What does this function call / what calls it?** → `trace`
+- **What is this file's role before I edit it?** → `get_context`
+- **What are all the HTTP endpoints?** → `find_entry_points(kind="http")`
+- **What does this file import?** → `get_dependencies`\
+"""
+
+# Claude Code: tools are deferred — must call ToolSearch to load schemas first
 CLAUDE_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
 ## orgraph — Codebase Knowledge Graph
 
 orgraph is a global MCP server with a pre-built call graph, topology clusters, and hybrid search index for any indexed repo. **Use it instead of grep, find, Bash, or Read for any question about how the codebase works.**
 
-### Step 1 — Load tools (do this at the start of every session)
+### Step 1 — Load tools at the start of every session
 
 ```
 ToolSearch: select:mcp__orgraph__search,mcp__orgraph__trace,mcp__orgraph__get_context,mcp__orgraph__find_entry_points,mcp__orgraph__get_dependencies
 ```
 
-### Step 2 — Always pass `repo` as the absolute path to the current project
+### Step 2 — Use orgraph tools, not grep/find/Read
 
-Determine the project root from your working directory (e.g. the git root) and pass it as `repo` to every call.
+""" + _ORGRAPH_TOOLS_TABLE + """
+<!-- ORGRAPH_END -->
+"""
 
-### Tools — use these, not grep/find/Read
+# Codex / Gemini CLI / Opencode: MCP tools load automatically, no ToolSearch needed
+AGENTS_MD_BLOCK = """\
+<!-- ORGRAPH_START -->
+## orgraph — Codebase Knowledge Graph
 
-| Instead of | Use |
-|---|---|
-| `grep -r "foo"` or `Bash find` | `mcp__orgraph__search(query, repo)` — semantic + keyword search |
-| Reading files to trace calls | `mcp__orgraph__trace(symbol, repo)` — follows call chains in the graph |
-| Guessing what a file does | `mcp__orgraph__get_context(file_or_symbol, repo)` — cluster, depth, indegree |
-| Listing API endpoints | `mcp__orgraph__find_entry_points(kind, repo)` — HTTP handlers, CLI entry points |
-| Checking imports manually | `mcp__orgraph__get_dependencies(file_path, repo)` — import/call dependency tree |
+orgraph is a global MCP server with a pre-built call graph, topology clusters, and hybrid search index for any indexed repo. **Use it instead of grep, find, Bash, or Read for any question about how the codebase works.**
 
-### When to use each tool
+The orgraph MCP tools are available as: `orgraph__search`, `orgraph__trace`, `orgraph__get_context`, `orgraph__find_entry_points`, `orgraph__get_dependencies`.
 
-- **Finding where something is implemented** → `search`
-- **Understanding what a function calls / what calls it** → `trace`
-- **Before editing a file — understanding its role** → `get_context`
-- **Mapping all HTTP endpoints or entry surfaces** → `find_entry_points(kind="http")`
-- **Checking what a file imports before refactoring** → `get_dependencies`
+""" + _ORGRAPH_TOOLS_TABLE + """
 <!-- ORGRAPH_END -->
 """
 
