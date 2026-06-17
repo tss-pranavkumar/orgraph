@@ -10,6 +10,29 @@ from typing import Any
 
 from orgraph.graph.kuzu import OrgraphDB
 
+# ── Enclosing symbol ──────────────────────────────────────────────────────────
+
+def get_enclosing_symbol(db: OrgraphDB, file_path: str, line: int) -> dict[str, Any] | None:
+    """Find the function or class whose definition encloses `line` in `file_path`.
+
+    Returns {uid, name, kind, line} or None if nothing is found.
+    Uses the nearest definition line at or before `line`.
+    """
+    best: dict[str, Any] | None = None
+    best_line = -1
+    for label, kind in (("Function", "function"), ("Class", "class")):
+        rows = db.query_to_dicts(
+            f"MATCH (s:{label}) WHERE s.path = $path AND s.line_number <= $line "
+            "RETURN s.uid AS uid, s.name AS name, s.line_number AS def_line "
+            "ORDER BY s.line_number DESC LIMIT 1",
+            {"path": file_path, "line": line},
+        )
+        if rows and rows[0]["def_line"] > best_line:
+            best_line = rows[0]["def_line"]
+            best = {**rows[0], "kind": kind, "line": rows[0]["def_line"]}
+    return best
+
+
 # ── Symbol resolution ─────────────────────────────────────────────────────────
 
 def resolve_symbol(db: OrgraphDB, name: str) -> list[dict[str, Any]]:

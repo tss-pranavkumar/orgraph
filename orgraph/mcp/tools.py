@@ -267,14 +267,19 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             return [_LOADING]
         if state.idx is None:
             return [{"error": "Search index not built. Re-run `orgraph index`."}]
+        from orgraph.graph import query as gq
+
         results = state.idx.search(query, top_k=top_k)
         out = []
         for r in results:
             c = r.chunk
+            sym = gq.get_enclosing_symbol(state.db, c.file_path, c.start_line)
             out.append({
                 "file": c.file_path,
                 "start_line": c.start_line,
                 "end_line": c.end_line,
+                "symbol": sym["name"] if sym else None,
+                "symbol_kind": sym["kind"] if sym else None,
                 "snippet": c.content[:1000],
                 "score": round(r.score, 4),
                 "language": c.language or "",

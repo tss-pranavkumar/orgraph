@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23 - 2026-06-17
+
+### Changed
+- **Search results now include enclosing symbol** — both the MCP `search` tool and `orgraph search` CLI now resolve which function or class owns each result's line range and attach `symbol` + `symbol_kind`. Agents no longer need a follow-up `list_symbols` call to know what they're looking at.
+- **CLI `orgraph search` redesigned** — relative file paths, function/class name displayed prominently, snippet rendered as proper multiline code (6 lines), raw float score replaced with `●●●` / `●●○` / `●○○` relevance tier based on ratio to top result.
+
 ## 0.1.22 - 2026-06-17
 
 ### Changed
