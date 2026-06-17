@@ -53,30 +53,35 @@ CLAUDE_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
 ## orgraph — Codebase Knowledge Graph
 
-An `orgraph` MCP server is registered globally. Its tools are deferred — load them at the
-start of every session before doing any codebase exploration:
+orgraph is a global MCP server with a pre-built call graph, topology clusters, and hybrid search index for any indexed repo. **Use it instead of grep, find, Bash, or Read for any question about how the codebase works.**
+
+### Step 1 — Load tools (do this at the start of every session)
 
 ```
 ToolSearch: select:mcp__orgraph__search,mcp__orgraph__trace,mcp__orgraph__get_context,mcp__orgraph__find_entry_points,mcp__orgraph__get_dependencies
 ```
 
-Once loaded, prefer orgraph over grep/find/Read for any question about how the code works.
-**Always pass `repo` as the absolute path to the current project** with every tool call.
+### Step 2 — Always pass `repo` as the absolute path to the current project
 
-- `mcp__orgraph__search(query, repo)` — hybrid BM25+semantic search over code chunks
-- `mcp__orgraph__trace(symbol, repo, direction, depth)` — follow call chains forward (callees) or backward (callers)
-- `mcp__orgraph__get_context(file_or_symbol, repo)` — topology cluster + community placement, call depth, indegree
-- `mcp__orgraph__find_entry_points(kind, repo)` — HTTP handlers and entry surfaces; kind = "all" | "http" | "topology"
-- `mcp__orgraph__get_dependencies(file_path, repo, direction, depth)` — import + call dependency tree
+Determine the project root from your working directory (e.g. the git root) and pass it as `repo` to every call.
 
-### Workflow
-1. Call ToolSearch to load the tools (see above) before the first orgraph call each session.
-2. Determine the project root (e.g. `/Users/you/my-project`) — pass it as `repo` to every call.
-3. Start with `mcp__orgraph__search` to find relevant code by description.
-4. Use `mcp__orgraph__trace` to follow call chains — don't read files to discover callers/callees.
-5. Use `mcp__orgraph__get_context` to understand where a file/symbol fits architecturally before editing.
-6. Use `mcp__orgraph__find_entry_points` to map the API surface of an unfamiliar codebase.
-7. Use `mcp__orgraph__get_dependencies` to understand what a file pulls in before refactoring it.
+### Tools — use these, not grep/find/Read
+
+| Instead of | Use |
+|---|---|
+| `grep -r "foo"` or `Bash find` | `mcp__orgraph__search(query, repo)` — semantic + keyword search |
+| Reading files to trace calls | `mcp__orgraph__trace(symbol, repo)` — follows call chains in the graph |
+| Guessing what a file does | `mcp__orgraph__get_context(file_or_symbol, repo)` — cluster, depth, indegree |
+| Listing API endpoints | `mcp__orgraph__find_entry_points(kind, repo)` — HTTP handlers, CLI entry points |
+| Checking imports manually | `mcp__orgraph__get_dependencies(file_path, repo)` — import/call dependency tree |
+
+### When to use each tool
+
+- **Finding where something is implemented** → `search`
+- **Understanding what a function calls / what calls it** → `trace`
+- **Before editing a file — understanding its role** → `get_context`
+- **Mapping all HTTP endpoints or entry surfaces** → `find_entry_points(kind="http")`
+- **Checking what a file imports before refactoring** → `get_dependencies`
 <!-- ORGRAPH_END -->
 """
 
