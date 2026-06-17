@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 - 2026-06-17
+
+### Fixed
+- `orgraph install` for Claude Code now removes all project-scoped `orgraph` entries from `~/.claude.json` when writing the global entry. Previously, stale project-scoped entries caused a scope conflict that made Claude Code use the wrong server (or fail entirely).
+
 ## 0.1.12 - 2026-06-17
 
 ### Changed
