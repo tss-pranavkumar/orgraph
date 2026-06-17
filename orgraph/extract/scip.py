@@ -56,6 +56,14 @@ def _detect_primary_lang(repo_path: Path) -> str | None:
     return max(counts, key=lambda k: counts[k])
 
 
+def scip_install_hint(lang: str) -> tuple[str, str] | None:
+    """Return (binary, install_hint) for a language's SCIP indexer, or None."""
+    for _, (l, binary, hint) in _SCIP_MAP.items():
+        if l == lang:
+            return binary, hint
+    return None
+
+
 def _binary_for_lang(lang: str) -> str | None:
     for _, (l, binary, _) in _SCIP_MAP.items():
         if l == lang and shutil.which(binary):
