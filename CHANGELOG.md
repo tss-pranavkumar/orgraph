@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.9 - 2026-06-17
+
+### Fixed
+- `orgraph install` now writes Claude Code MCP config to the project-scoped `projects[abs_path][mcpServers]` key in `~/.claude.json` instead of the global `mcpServers` key. The global key is loaded at daemon start with no project context, so `serve .` resolved to the wrong directory — the server either failed to find an index or served the wrong repo. The new entry matches exactly what `claude mcp add` produces and is only activated when Claude Code opens that project.
+- `'.'` placeholder in MCP args is now replaced with the absolute repo path for all agents (not just Claude Code), so agents that launch the server from a different working directory always get the correct index.
+- Stale global-level `orgraph` entries written by earlier installs are automatically cleaned up on the next `orgraph install` run.
+- `orgraph install` and `orgraph uninstall` now accept an optional `REPO_PATH` argument (default: current directory) so you can register a repo you're not currently `cd`'d into.
+
+### Added
+- `trace` and `get_context` MCP tools now resolve Class nodes in addition to Function nodes, so class-based symbols (e.g. Falcon resource classes) no longer return `found: false`.
+- `get_context` now reports symbol-level indegree (incoming CALLS edges in the graph) instead of file-level indegree from the topology map — previously returned 0 for symbols called only within their own file.
+- Falcon HTTP handlers (`on_get`, `on_post`, `on_put`, `on_patch`, `on_delete`, `on_options`, `on_head`) are now detected during indexing and populate the `http_method` field, so `find_entry_points(kind="http")` surfaces them correctly.
+- Python class methods are now stored as `ClassName.method_name` in both the SCIP and TreeSitter extractors, preventing uid collisions when multiple resource classes define the same method name.
+
 ## 0.1.8 - 2026-06-17
 
 ### Fixed
