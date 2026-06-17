@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.25 - 2026-06-17
+
+### Fixed
+- **Go/Java/C/C++/C#/Ruby/PHP/Rust repos no longer index to 0 nodes.** The bundled tree-sitter
+  extractor already supports ~25 languages, but the package only shipped the Python/JS/TS grammars —
+  so any repo in another language extracted nothing and reported a misleading green "Done. 0 nodes."
+  These 8 grammars are now core dependencies. (Verified: a Go repo went 0 → 187 nodes after the fix.)
+  Other supported langs (Kotlin, Scala, Groovy, Lua, Swift, …) use incompatible release schemes;
+  enable one by installing its grammar into the same env, e.g. `uv pip install tree-sitter-kotlin`.
+
+### Added
+- **Loud warning on unextractable files.** `index` and `reindex` now compare code files on disk
+  against the extensions that actually produced symbols and warn (CLI) / return `warnings` (MCP) when
+  files yielded nothing — naming the extensions and how to enable them — instead of silently
+  reporting an empty index.
+
 ## 0.1.24 - 2026-06-17
 
 ### Fixed

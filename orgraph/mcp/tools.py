@@ -652,6 +652,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             "edges": stats["edges"],
             "clusters": stats["clusters"],
             "communities": stats["communities"],
+            "warnings": stats["warnings"],
             "elapsed_s": round(time.perf_counter() - t0, 1),
         }
 

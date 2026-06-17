@@ -55,6 +55,8 @@ def build_index(
     if result is None:
         result = extract_repo(repo_path, scratch_dir=orgraph_dir / "scip_scratch")
 
+    warnings = _unextractable_warnings(repo_path, result)
+
     # --- Graph: full wipe + ingest ---
     create_schema(db)
     builder = GraphBuilder(db=db, repo_path=repo_path)
@@ -82,6 +84,36 @@ def build_index(
         "clusters": len(topology.clusters),
         "foundational": bool(topology.foundational_files),
         "communities": len(communities),
+        "warnings": warnings,
         "topology": topology,
         "communities_map": communities,
     }
+
+
+def _unextractable_warnings(repo_path: Path, result: ExtractionResult) -> list[str]:
+    """Warn about code files that produced no symbols (missing grammar / scip binary).
+
+    Compares the code files on disk against the file extensions that actually
+    yielded nodes. Catches the silent "indexed 0 nodes" case — e.g. a Go repo
+    when tree-sitter-go isn't installed.
+    """
+    from collections import Counter
+
+    from orgraph.extract.treesitter import _walk_code_files
+
+    produced = {Path(n.get("path", "")).suffix.lower() for n in result.nodes}
+    missing: Counter[str] = Counter()
+    for p in _walk_code_files(repo_path):
+        suf = p.suffix.lower()
+        if suf and suf not in produced:
+            missing[suf] += 1
+    if not missing:
+        return []
+
+    top = ", ".join(f"{count} {ext}" for ext, count in missing.most_common(6))
+    return [
+        f"No symbols extracted from {sum(missing.values())} code file(s) [{top}]. "
+        "orgraph has no working extractor for these languages — install the matching "
+        "tree-sitter grammar (e.g. `uv pip install tree-sitter-<lang>`) or a `scip-<lang>` "
+        "binary, then re-index."
+    ]
