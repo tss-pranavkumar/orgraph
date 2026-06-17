@@ -35,6 +35,13 @@ _SCIP_MAP: dict[str, tuple[str, str, str]] = {
 
 # SCIP SymbolKind values we care about
 _KIND_FUNCTION = {17, 26}   # Function, Method
+
+# Falcon resource method names → HTTP verbs
+_FALCON_HTTP: dict[str, str] = {
+    "on_get": "GET", "on_post": "POST", "on_put": "PUT",
+    "on_patch": "PATCH", "on_delete": "DELETE", "on_options": "OPTIONS",
+    "on_head": "HEAD",
+}
 _KIND_CLASS    = {7}         # Class
 _KIND_INTERFACE= {20, 54}   # Interface, Protocol
 _KIND_STRUCT   = {49}
@@ -188,6 +195,20 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
         lang_info = _SCIP_MAP.get(ext)
         lang = lang_info[0] if lang_info else "unknown"
 
+        # For Python methods (kind=26), extract class name from SCIP symbol
+        # SCIP symbol format: "scip-python . path/to/file.py/ClassName#method_name()."
+        # Use class-qualified name to avoid collisions across different resource classes.
+        http_method = ""
+        http_path = ""
+        if kind == 26 and lang == "python":  # Method kind
+            last_segment = sym.split("/")[-1] if "/" in sym else sym
+            if "#" in last_segment:
+                class_name = last_segment.split("#")[0]
+                if class_name:
+                    name = f"{class_name}.{name}"
+                    if name.split(".")[-1] in _FALCON_HTTP:
+                        http_method = _FALCON_HTTP[name.split(".")[-1]]
+
         uid = make_uid(name, abs_path, line_no)
         uid_map[sym] = uid
 
@@ -203,6 +224,8 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             "docstring": info.get("documentation", "") or "",
             "is_dependency": False,
             "confidence": "EXTRACTED",
+            "http_method": http_method,
+            "http_path": http_path,
         }
 
         # Try to read source snippet

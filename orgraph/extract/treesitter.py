@@ -44,6 +44,12 @@ _LABEL_MAP = {
 
 _IGNORED_FILE_TYPES = frozenset({"rationale", "concept", "paper", "image", "video"})
 
+_FALCON_HTTP: dict[str, str] = {
+    "on_get": "GET", "on_post": "POST", "on_put": "PUT",
+    "on_patch": "PATCH", "on_delete": "DELETE", "on_options": "OPTIONS",
+    "on_head": "HEAD",
+}
+
 
 def _walk_code_files(repo_path: Path) -> list[Path]:
     files: list[Path] = []
@@ -96,6 +102,19 @@ class TreeSitterExtractor:
         raw_nodes: list[dict] = raw.get("nodes", [])
         raw_edges: list[dict] = raw.get("edges", [])
 
+        # Build method-node-id → class name from graphify's "method" edges.
+        # Graphify emits a "method" edge from the class node to each method node.
+        # This lets us qualify method names as "ClassName.method_name" and detect Falcon handlers.
+        id_to_class_name: dict[str, str] = {}
+        node_id_to_label: dict[str, str] = {n["id"]: n.get("label", "") for n in raw_nodes}
+        for e in raw_edges:
+            if e.get("relation") == "method":
+                class_label = node_id_to_label.get(e.get("source", ""), "")
+                # Class labels in graphify are PascalCase without trailing "()"
+                class_name = class_label.rstrip("()").lstrip(".")
+                if class_name and not class_name.endswith("()"):
+                    id_to_class_name[e.get("target", "")] = class_name
+
         # Build id → NodeDict map for uid resolution
         id_to_uid: dict[str, str] = {}
         nodes: list[NodeDict] = []
@@ -137,6 +156,17 @@ class TreeSitterExtractor:
             is_class = (not is_func) and name and name[0].isupper()
             label = "Class" if is_class else "Function"
 
+            # Qualify method names with their parent class to avoid collisions
+            # (e.g. two resource classes both having "on_post").
+            http_method = ""
+            http_path = ""
+            class_name = id_to_class_name.get(n["id"])
+            if class_name and is_func:
+                name = f"{class_name}.{name}"
+                bare = name.split(".")[-1]
+                if lang == "python" and bare in _FALCON_HTTP:
+                    http_method = _FALCON_HTTP[bare]
+
             uid = make_uid(name, abs_path, line_no)
             id_to_uid[n["id"]] = uid
 
@@ -152,6 +182,8 @@ class TreeSitterExtractor:
                 "docstring": "",
                 "is_dependency": False,
                 "confidence": n.get("confidence", "EXTRACTED"),
+                "http_method": http_method,
+                "http_path": http_path,
             }
             nodes.append(node)
 
