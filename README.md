@@ -56,7 +56,7 @@ If you prefer to configure manually instead of using `orgraph install`:
   "mcpServers": {
     "orgraph": {
       "command": "uvx",
-      "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."]
+      "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."]
     }
   }
 }
@@ -68,7 +68,7 @@ If you prefer to configure manually instead of using `orgraph install`:
   "mcpServers": {
     "orgraph": {
       "command": "uvx",
-      "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."]
+      "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."]
     }
   }
 }

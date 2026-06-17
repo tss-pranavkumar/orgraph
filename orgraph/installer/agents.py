@@ -16,14 +16,14 @@ Mode = Literal["install", "uninstall"]
 # orgraph serve uses "." so MCP client cwd (workspace root) is the repo
 _MCP_ENTRY: dict[str, object] = {
     "command": "uvx",
-    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
+    "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."],
     "type": "stdio",
 }
 
 # VS Code uses "servers" key and slightly different shape
 _VSCODE_MCP_ENTRY: dict[str, object] = {
     "command": "uvx",
-    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
+    "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."],
     "type": "stdio",
 }
 
