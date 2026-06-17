@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.0
+## Current version: 0.1.3
 
 ## What orgraph does
 
@@ -73,7 +73,7 @@ orgraph/
 
 ```
 <repo>/.orgraph/
-  graph.kuzu        # Kuzu DB (single file)
+  graph.kuzu/       # Kuzu DB directory (kuzu 0.9+; old single-file format auto-migrated on serve)
   manifest.json     # file → md5
   topology.json     # TopologyMap serialised
   communities.json  # Leiden {community_id: [node_uids]}
@@ -81,7 +81,7 @@ orgraph/
 
 ## Architecture invariants
 
-- **Kuzu DB path**: Kuzu creates its own structure at `db_path`. Never `mkdir(db_path)` — only `mkdir(db_path.parent)`. Fixed in `graph/kuzu.py`.
+- **Kuzu DB path**: Kuzu 0.9+ creates a *directory* at `db_path`. Never `mkdir(db_path)` — only `mkdir(db_path.parent)`. `serve` auto-deletes stale single-file `graph.kuzu` (old format) and re-indexes.
 - **graphify path**: `extract/treesitter.py` adds `~/tss/codegen/orgraph/.codes/graphify` to `sys.path` at runtime. If `.codes/` moves, update `_GRAPHIFY_ROOT`.
 - **graphify label field**: graphify puts display names in `label` (`"authenticate()"`, `"User"`). Not a type tag. Conversion logic lives in `treesitter.py`.
 - **tree-sitter grammars**: `tree-sitter-python`, `tree-sitter-javascript`, `tree-sitter-typescript` must be installed (in `pyproject.toml` deps).
