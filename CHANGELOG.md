@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 - 2026-06-17
+
+### Fixed
+- Codex config: was writing `[[mcp_servers]]` (array-of-tables, invalid) — now writes `[mcp_servers.orgraph]` (correct inline table format); auto-migrates stale entries on uninstall
+- Opencode config: was missing `"type": "local"` and `"enabled": true` — Opencode rejects entries without these
+
 ## 0.1.5 - 2026-06-17
 
 ### Fixed
