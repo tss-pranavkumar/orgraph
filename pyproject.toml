@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orgraph-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Codebase knowledge graph MCP server — call chains, topology, and hybrid search for coding agents"
 readme = "README.md"
 license = { text = "MIT" }
