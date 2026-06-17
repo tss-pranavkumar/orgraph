@@ -13,7 +13,11 @@ def _build_full_index(tmp_path: Path):
     """Build a complete index (graph + topology + search) from fixture."""
     target = tmp_path / "simple_python"
     shutil.copytree(FIXTURE, target)
+    return _build_full_index_from_path(target)
 
+
+def _build_full_index_from_path(target: Path):
+    """Build a complete index (graph + topology + search) from an existing repo path."""
     from orgraph.extract.treesitter import TreeSitterExtractor
     from orgraph.graph.builder import GraphBuilder
     from orgraph.graph.kuzu import OrgraphDB
@@ -49,9 +53,17 @@ def _build_full_index(tmp_path: Path):
 
 def _get_tools(db, idx, topology, communities, repo_path):
     from fastmcp import FastMCP
-    from orgraph.mcp.tools import register_tools
+    from orgraph.mcp import tools as mcp_tools
+    from orgraph.mcp.tools import State, register_tools
+
+    repo_path = repo_path.resolve()
+    state = State(db=db, idx=idx, topology=topology, communities=communities, repo_path=repo_path)
+    state.rebuild_lookups()
+    mcp_tools._repo_states[str(repo_path)] = state
+    mcp_tools._startup_repo = repo_path
+
     mcp = FastMCP("orgraph-test")
-    return register_tools(mcp, db, idx, topology, communities, repo_path)
+    return register_tools(mcp, startup_repo=repo_path)
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +77,15 @@ def full_index(tmp_path_factory):
 def test_all_tools_registered(full_index):
     db, idx, topology, communities, repo_path = full_index
     tools = _get_tools(db, idx, topology, communities, repo_path)
-    assert set(tools.keys()) == {"search", "trace", "get_context", "find_entry_points", "get_dependencies", "reindex"}
+    assert set(tools.keys()) == {
+        "search",
+        "trace",
+        "get_context",
+        "list_symbols",
+        "find_entry_points",
+        "get_dependencies",
+        "reindex",
+    }
 
 
 # ── search tool ────────────────────────────────────────────────────────────
@@ -79,6 +99,44 @@ def test_search_tool_returns_results(full_index):
     assert "file" in results[0]
     assert "score" in results[0]
     assert "snippet" in results[0]
+
+
+def test_search_snippet_allows_1000_chars(full_index):
+    from dataclasses import dataclass
+
+    db, _idx, topology, communities, repo_path = full_index
+
+    @dataclass
+    class Chunk:
+        file_path: str
+        start_line: int
+        end_line: int
+        content: str
+        language: str
+
+    @dataclass
+    class SearchResult:
+        chunk: Chunk
+        score: float
+
+    class FakeIndex:
+        def search(self, query: str, top_k: int = 10):
+            return [
+                SearchResult(
+                    chunk=Chunk(
+                        file_path="long.py",
+                        start_line=1,
+                        end_line=80,
+                        content="x" * 1500,
+                        language="python",
+                    ),
+                    score=1.0,
+                )
+            ]
+
+    tools = _get_tools(db, FakeIndex(), topology, communities, repo_path)
+    results = tools["search"](query="anything")
+    assert len(results[0]["snippet"]) == 1000
 
 
 def test_search_tool_no_index_returns_error(full_index):
@@ -107,6 +165,15 @@ def test_trace_tool_unknown_symbol(full_index):
     assert result["found"] is False
 
 
+def test_trace_file_fallback_returns_candidates(full_index):
+    db, idx, topology, communities, repo_path = full_index
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["trace"](symbol="auth.py", direction="callees", depth=1)
+    assert result["found"] is False
+    assert "candidates" in result
+    assert any(c["name"] == "authenticate" for c in result["candidates"])
+
+
 def test_trace_returns_callers(full_index):
     db, idx, topology, communities, repo_path = full_index
     tools = _get_tools(db, idx, topology, communities, repo_path)
@@ -131,6 +198,18 @@ def test_get_context_by_file(full_index):
     result = tools["get_context"](file_or_symbol="auth.py")
     assert isinstance(result, dict)
     assert "found" in result
+    assert "community_peers" in result
+
+
+# ── list_symbols tool ───────────────────────────────────────────────────────
+
+def test_list_symbols_returns_file_api_surface(full_index):
+    db, idx, topology, communities, repo_path = full_index
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["list_symbols"](file_path="auth.py")
+    assert isinstance(result, list)
+    assert any(item["name"] == "authenticate" for item in result)
+    assert result == sorted(result, key=lambda r: (r["line"], r["kind"], r["name"]))
 
 
 # ── find_entry_points tool ─────────────────────────────────────────────────
@@ -149,6 +228,26 @@ def test_find_entry_points_each_has_kind(full_index):
     for item in result[:5]:
         if "error" not in item:
             assert "kind" in item
+
+
+def test_find_entry_points_tasks(tmp_path):
+    target = tmp_path / "celery_project"
+    target.mkdir()
+    (target / "tasks.py").write_text(
+        "def send_mail_task(user_id):\n"
+        "    return user_id\n",
+        encoding="utf-8",
+    )
+    (target / "refund.py").write_text(
+        "from tasks import send_mail_task\n\n"
+        "def initiate_refund_request(user_id):\n"
+        "    send_mail_task.apply_async(args=[user_id])\n",
+        encoding="utf-8",
+    )
+    db, idx, topology, communities, repo_path = _build_full_index_from_path(target)
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["find_entry_points"](kind="tasks")
+    assert any(item["symbol"] == "send_mail_task" for item in result)
 
 
 # ── get_dependencies tool ──────────────────────────────────────────────────

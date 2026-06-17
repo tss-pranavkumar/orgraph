@@ -115,7 +115,8 @@ _EDGE_TABLES = [
         FROM Function TO Class,
         FROM Class TO Function,
         line_number INT64,
-        confidence STRING
+        confidence STRING,
+        call_kind STRING
     )""",
     """CREATE REL TABLE IF NOT EXISTS IMPORTS(
         FROM File TO Module,

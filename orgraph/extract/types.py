@@ -28,6 +28,7 @@ class EdgeDict(TypedDict, total=False):
     relation: str       # "CALLS"|"IMPORTS"|"INHERITS"|"CONTAINS"|"IMPLEMENTS"
     confidence: str
     line_number: int
+    call_kind: str      # for CALLS: "local"|"celery_dispatch"|...
     alias: str          # for IMPORTS
 
 

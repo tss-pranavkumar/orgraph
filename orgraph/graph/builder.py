@@ -200,6 +200,7 @@ class GraphBuilder:
 
             confidence = edge.get("confidence", "INFERRED")
             line_no = edge.get("line_number", 0)
+            call_kind = edge.get("call_kind", "local")
 
             # Try each valid (src_label, dst_label) pair for this relation
             pairs = _EDGE_TABLES.get(relation, [])
@@ -211,10 +212,14 @@ class GraphBuilder:
                         f"MERGE (s)-[r:{relation}]->(d) "
                         f"SET r.confidence = $conf, r.line_number = $line"
                     )
-                    self.db.execute(cypher, {
+                    params = {
                         "src": src_uid, "dst": dst_uid,
                         "conf": confidence, "line": line_no,
-                    })
+                    }
+                    if relation == "CALLS":
+                        cypher += ", r.call_kind = $call_kind"
+                        params["call_kind"] = call_kind
+                    self.db.execute(cypher, params)
                     written = True
                     break
                 except Exception:

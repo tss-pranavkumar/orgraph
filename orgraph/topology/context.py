@@ -101,12 +101,14 @@ def build_repo_context(result: ExtractionResult, repo_path: Path) -> RepoContext
         callee_file = dst_node.get("path", "")
         callee_sym = dst_node.get("name", "")
         if caller_file and caller_sym and callee_file and callee_sym:
+            call_kind = edge.get("call_kind") or CALL_KIND_LOCAL
             cg.add_edge(CallEdge(
                 caller_file=caller_file,
                 caller_symbol=caller_sym,
                 callee_file=callee_file,
                 callee_symbol=callee_sym,
-                call_kind=CALL_KIND_LOCAL,
+                call_kind=call_kind if call_kind else CALL_KIND_LOCAL,
+                call_site_line=edge.get("line_number", 0),
             ))
 
     # Build parsed_files from nodes grouped by file

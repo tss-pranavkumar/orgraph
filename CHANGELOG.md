@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.20 - 2026-06-17
+
+### Added
+- **`list_symbols` MCP tool** — given a file path, returns all functions/classes defined in it ordered by source line. Resolves by absolute path, filename, or path fragment.
+- **Celery dispatch detection** — `_extract_celery_dispatch_edges()` in `treesitter.py` scans Python files for `.apply_async(` and `.delay(` calls, resolves the enclosing function as caller, and emits `CALLS` edges tagged `call_kind=celery_dispatch`. Async task boundaries are now visible in the call graph.
+- **Falcon HTTP route extraction** — `_collect_falcon_routes()` parses `app.add_route("/path", ClassName())` across all Python files and populates `http_path` on handler nodes. `find_entry_points(kind="http")` now returns routes alongside methods.
+- **`find_entry_points(kind="tasks")`** — was documented but unimplemented (dead branch). Now queries CALLS edges with `call_kind=celery_dispatch` and returns caller + task name + file + line.
+- **Module/file-level trace fallback** — when `trace("SomeModule")` finds no exact function/class match, returns a `candidates` list of symbols defined in the matching file instead of a silent `found: false`.
+- **Community peers in `get_context`** — response now includes `community_peers`: up to 10 co-located symbols from other files in the same Leiden community.
+- **`call_kind` column on CALLS edge table** — schema updated; stale indexes without this column are auto-detected and re-indexed on server start.
+
+### Changed
+- Search snippet length increased from 400 to 1000 characters.
+
 ## 0.1.19 - 2026-06-17
 
 ### Changed

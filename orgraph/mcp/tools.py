@@ -65,11 +65,18 @@ def _bg_load(state: State, repo_path: Path) -> None:
 
 
 def _ensure_indexed(repo_path: Path) -> None:
+    import shutil
     import sys
     orgraph_dir = repo_path / ".orgraph"
     db_path = orgraph_dir / "graph.kuzu"
     if db_path.exists() and not db_path.is_dir():
         db_path.unlink()
+    if db_path.exists() and _schema_needs_reindex(db_path):
+        print(
+            f"orgraph: index schema is stale for {repo_path.name} — re-indexing now…",
+            file=sys.stderr,
+        )
+        shutil.rmtree(db_path)
     if db_path.exists():
         return
     print(f"orgraph: no index found for {repo_path.name} — indexing now…", file=sys.stderr)
@@ -78,6 +85,20 @@ def _ensure_indexed(repo_path: Path) -> None:
     result = CliRunner().invoke(index, [str(repo_path)])
     if result.exit_code != 0:
         print(f"orgraph: auto-index failed\n{result.output}", file=sys.stderr)
+
+
+def _schema_needs_reindex(db_path: Path) -> bool:
+    try:
+        from orgraph.graph.kuzu import OrgraphDB
+
+        db = OrgraphDB(db_path)
+        try:
+            rows = db.query_to_dicts("CALL table_info('CALLS') RETURN name")
+            return not any(row.get("name") == "call_kind" for row in rows)
+        finally:
+            db.close()
+    except Exception:
+        return False
 
 
 def _load_into_state(state: State, repo_path: Path) -> None:
@@ -121,6 +142,142 @@ def _no_repo_error(repo_arg: str) -> dict:
     }
 
 
+def _resolve_indexed_file_path(state: State, file_path: str) -> str:
+    candidate = Path(file_path)
+    if not candidate.is_absolute():
+        candidate = state.repo_path / file_path
+    abs_candidate = str(candidate.resolve()) if candidate.exists() else ""
+
+    if abs_candidate:
+        rows = state.db.query_to_dicts(
+            "MATCH (f:File {path: $path}) RETURN f.path AS path LIMIT 1",
+            {"path": abs_candidate},
+        )
+        if rows:
+            return rows[0]["path"]
+
+    name = Path(file_path).name
+    rows = state.db.query_to_dicts(
+        "MATCH (f:File) WHERE f.name = $name RETURN f.path AS path LIMIT 1",
+        {"name": name},
+    )
+    if rows:
+        return rows[0]["path"]
+
+    fragment = str(file_path)
+    rows = state.db.query_to_dicts(
+        "MATCH (f:File) WHERE f.path CONTAINS $fragment RETURN f.path AS path LIMIT 1",
+        {"fragment": fragment},
+    )
+    return rows[0]["path"] if rows else abs_candidate
+
+
+def _symbols_for_file(state: State, file_path: str, limit: int = 200) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for label, kind in (("Function", "function"), ("Class", "class")):
+        part = state.db.query_to_dicts(
+            f"MATCH (s:{label}) WHERE s.path = $path "
+            "RETURN s.uid AS uid, s.name AS name, s.path AS path, "
+            "s.line_number AS line",
+            {"path": file_path},
+        )
+        for row in part:
+            rows.append({
+                "name": row.get("name") or "",
+                "kind": kind,
+                "path": row.get("path") or "",
+                "line": row.get("line") or 0,
+                "uid": row.get("uid") or "",
+            })
+    rows.sort(key=lambda r: (r["line"], r["kind"], r["name"]))
+    return rows[:limit]
+
+
+def _file_symbol_candidates(state: State, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    resolved = _resolve_indexed_file_path(state, query)
+    if resolved:
+        symbols = _symbols_for_file(state, resolved, limit=limit)
+        if symbols:
+            return symbols
+
+    fragments = [query]
+    stem = Path(query).stem
+    if stem and stem != query:
+        fragments.append(stem)
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for fragment in fragments:
+        for label, kind in (("Function", "function"), ("Class", "class")):
+            part = state.db.query_to_dicts(
+                f"MATCH (s:{label}) WHERE s.path CONTAINS $fragment "
+                "RETURN s.uid AS uid, s.name AS name, s.path AS path, "
+                "s.line_number AS line LIMIT 20",
+                {"fragment": fragment},
+            )
+            for row in part:
+                uid = row.get("uid") or ""
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                rows.append({
+                    "name": row.get("name") or "",
+                    "kind": kind,
+                    "path": row.get("path") or "",
+                    "line": row.get("line") or 0,
+                    "uid": uid,
+                })
+    rows.sort(key=lambda r: (r["path"], r["line"], r["kind"], r["name"]))
+    return rows[:limit]
+
+
+def _community_peers(
+    state: State,
+    community_id: int | None,
+    uid: str | None,
+    file_path: str | None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    if community_id is None or not state.communities:
+        return []
+
+    peers: list[dict[str, Any]] = []
+    for peer_uid in state.communities.get(community_id, []):
+        if peer_uid == uid:
+            continue
+        row: dict[str, Any] | None = None
+        kind = "function"
+        rows = state.db.query_to_dicts(
+            "MATCH (s:Function) WHERE s.uid = $uid "
+            "RETURN s.uid AS uid, s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
+            {"uid": peer_uid},
+        )
+        if rows:
+            row = rows[0]
+        else:
+            rows = state.db.query_to_dicts(
+                "MATCH (s:Class) WHERE s.uid = $uid "
+                "RETURN s.uid AS uid, s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
+                {"uid": peer_uid},
+            )
+            if rows:
+                row = rows[0]
+                kind = "class"
+        if not row:
+            continue
+        if file_path and row.get("path") == file_path:
+            continue
+        peers.append({
+            "name": row.get("name") or "",
+            "kind": kind,
+            "path": row.get("path") or "",
+            "line": row.get("line") or 0,
+        })
+        if len(peers) >= limit:
+            break
+    return peers
+
+
 def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
     """Register all orgraph tools on a FastMCP instance.
 
@@ -159,7 +316,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                 "file": c.file_path,
                 "start_line": c.start_line,
                 "end_line": c.end_line,
-                "snippet": c.content[:400],
+                "snippet": c.content[:1000],
                 "score": round(r.score, 4),
                 "language": c.language or "",
             })
@@ -211,6 +368,15 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                 {"name": symbol},
             )
         if not roots:
+            candidates = _file_symbol_candidates(state, symbol, limit=20)
+            if candidates:
+                return {
+                    "root": symbol,
+                    "found": False,
+                    "chain": [],
+                    "candidates": candidates,
+                    "message": "No exact function/class match. Pick one of these symbols from the matching file.",
+                }
             return {"root": symbol, "found": False, "chain": []}
 
         root = roots[0]
@@ -229,14 +395,16 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                 edges = state.db.query_to_dicts(
                     "MATCH (f)-[r:CALLS]->(c) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
-                    "c.line_number AS line, r.confidence AS confidence LIMIT 30",
+                    "c.line_number AS line, r.confidence AS confidence, "
+                    "r.call_kind AS call_kind LIMIT 30",
                     {"uid": uid},
                 )
             else:
                 edges = state.db.query_to_dicts(
                     "MATCH (c)-[r:CALLS]->(f) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
-                    "c.line_number AS line, r.confidence AS confidence LIMIT 30",
+                    "c.line_number AS line, r.confidence AS confidence, "
+                    "r.call_kind AS call_kind LIMIT 30",
                     {"uid": uid},
                 )
 
@@ -249,6 +417,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                     "to_file": e["path"],
                     "to_line": e.get("line") or 0,
                     "confidence": e.get("confidence") or "INFERRED",
+                    "call_kind": e.get("call_kind") or "local",
                     "depth": d + 1,
                 })
                 if e["uid"] not in visited:
@@ -355,7 +524,27 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             result["cluster_related_files"] = [
                 f for f in cluster.all_files[:10] if f != file_path
             ]
+        result["community_peers"] = _community_peers(state, community_id_for_file, uid, file_path)
         return result
+
+    # ── Tool 3b: list_symbols ───────────────────────────────────────────────
+
+    @mcp.tool()
+    def list_symbols(file_path: str, repo: str = "") -> list[dict[str, Any]]:
+        """List functions/classes defined in a file, ordered by source line.
+
+        Pass `repo` as the absolute path to the project.
+        """
+        state = _get_state(repo)
+        if state is None:
+            return [_no_repo_error(repo)]
+        if state.db is None:
+            return [_LOADING]
+
+        abs_path = _resolve_indexed_file_path(state, file_path)
+        if not abs_path:
+            return []
+        return _symbols_for_file(state, abs_path)
 
     # ── Tool 4: find_entry_points ───────────────────────────────────────────
 
@@ -391,6 +580,29 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                     "line": r.get("line") or 0,
                     "http_method": r.get("method") or "",
                     "http_path": r.get("route") or "",
+                    "cluster": cluster_id,
+                })
+
+        if kind in ("all", "tasks"):
+            rows = state.db.query_to_dicts(
+                "MATCH (caller)-[r:CALLS]->(callee) "
+                "WHERE r.call_kind = 'celery_dispatch' "
+                "RETURN caller.name AS caller, caller.path AS caller_path, "
+                "caller.line_number AS caller_line, callee.name AS task, "
+                "callee.path AS task_path, callee.line_number AS task_line, "
+                "r.line_number AS line LIMIT 100"
+            )
+            for r in rows:
+                cluster_id = state.topology.file_cluster_id.get(r["caller_path"])
+                out.append({
+                    "kind": "task",
+                    "symbol": r.get("task") or "",
+                    "file": r.get("task_path") or "",
+                    "line": r.get("task_line") or 0,
+                    "dispatcher": r.get("caller") or "",
+                    "dispatcher_file": r.get("caller_path") or "",
+                    "dispatcher_line": r.get("line") or r.get("caller_line") or 0,
+                    "call_kind": "celery_dispatch",
                     "cluster": cluster_id,
                 })
 
@@ -636,6 +848,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         "search": search,
         "trace": trace,
         "get_context": get_context,
+        "list_symbols": list_symbols,
         "find_entry_points": find_entry_points,
         "get_dependencies": get_dependencies,
         "reindex": reindex,
