@@ -64,12 +64,12 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
     if key == "mcp_servers":  # TOML (Codex)
         action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
     elif agent.id == "claude":
-        # Claude Code uses project-scoped mcpServers keyed by abs repo path.
-        # Writing globally with "serve ." would resolve to the wrong directory at startup.
-        if mode == "install" and repo_path:
-            action = merge_claude_mcp(path, repo_path, entry)
+        # Claude Code: write to global mcpServers (like semble).
+        # Tools accept `repo` per call, so no path needed at startup.
+        if mode == "install":
+            action = merge_json_mcp(path, key, entry)
         else:
-            action = remove_claude_mcp(path, repo_path or Path(".").resolve())
+            action = remove_json_mcp(path, key)
     elif mode == "install":
         # Bake abs repo path into args for all other agents too (replaces "." placeholder)
         baked = _bake_repo_path(entry, repo_path) if repo_path else entry
@@ -82,13 +82,7 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
 def _apply_instructions(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) -> WriteResult | None:
     if agent.instructions_path is None:
         return None
-    # For Claude Code, write to {repo_path}/.claude/CLAUDE.md so it's loaded
-    # as project-level context — the global ~/.claude/CLAUDE.md is often buried
-    # and Claude may not act on it proactively.
-    if agent.id == "claude" and repo_path:
-        path = repo_path / ".claude" / "CLAUDE.md"
-    else:
-        path = agent.instructions_path
+    path = agent.instructions_path
     action = upsert_instructions(path, CLAUDE_MD_BLOCK) if mode == "install" else remove_instructions(path)
     return WriteResult(path, action)
 
@@ -137,10 +131,7 @@ def _print_plan(agents: list[AgentTarget], integrations: list[Integration], repo
     for agent in agents:
         print(f"  {_BOLD}{agent.display_name}{_RESET}")
         for integ in integrations:
-            if integ.id == "instructions" and agent.id == "claude" and repo_path:
-                path = repo_path / ".claude" / "CLAUDE.md"
-            else:
-                path = integ.plan_path(agent)
+            path = integ.plan_path(agent)
             ok = path is not None
             print(f"    {integ.label:<13} {_tick(ok)}  {path if ok else '(not supported)'}")
     print()

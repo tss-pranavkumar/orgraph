@@ -104,12 +104,11 @@ def remove_json_mcp(path: Path, key: str) -> Action:
 def merge_toml_mcp(path: Path, repo_path: Path | None = None) -> Action:
     """Add [mcp_servers.orgraph] block to a Codex config.toml."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    serve_arg = str(repo_path) if repo_path else "."
     orgraph_bin = _resolve_orgraph_bin()
     block = (
         '\n[mcp_servers.orgraph]\n'
         f'command = "{orgraph_bin}"\n'
-        f'args = ["serve", "{serve_arg}"]\n'
+        'args = ["serve"]\n'
     )
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     if "[mcp_servers.orgraph]" in existing:

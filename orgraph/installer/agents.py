@@ -32,14 +32,17 @@ def _resolve_orgraph_bin() -> str:
 
 
 def get_mcp_entry() -> dict[str, object]:
-    """Build the stdio MCP entry using the currently-running orgraph binary."""
-    return {"command": _resolve_orgraph_bin(), "args": ["serve", "."], "type": "stdio"}
+    """Build the global stdio MCP entry using the currently-running orgraph binary.
+
+    No repo path in args — tools accept `repo` per call (like semble).
+    """
+    return {"command": _resolve_orgraph_bin(), "args": ["serve"], "type": "stdio"}
 
 
 def get_opencode_mcp_entry() -> dict[str, object]:
-    """Build the Opencode MCP entry using the currently-running orgraph binary."""
+    """Build the global Opencode MCP entry using the currently-running orgraph binary."""
     bin_ = _resolve_orgraph_bin()
-    return {"command": [bin_, "serve", "."], "type": "local", "enabled": True}
+    return {"command": [bin_, "serve"], "type": "local", "enabled": True}
 
 
 # Keep module-level names for import compatibility — evaluated lazily at install time
@@ -50,27 +53,30 @@ CLAUDE_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
 ## orgraph — Codebase Knowledge Graph
 
-An `orgraph` MCP server is registered for this repo. Its tools are deferred — load them at the
+An `orgraph` MCP server is registered globally. Its tools are deferred — load them at the
 start of every session before doing any codebase exploration:
 
 ```
 ToolSearch: select:mcp__orgraph__search,mcp__orgraph__trace,mcp__orgraph__get_context,mcp__orgraph__find_entry_points,mcp__orgraph__get_dependencies
 ```
 
-Once loaded, prefer orgraph over grep/find/Read for any question about how the code works:
-- `mcp__orgraph__search(query)` — hybrid BM25+semantic search over code chunks
-- `mcp__orgraph__trace(symbol, direction, depth)` — follow call chains forward (callees) or backward (callers)
-- `mcp__orgraph__get_context(file_or_symbol)` — topology cluster + community placement, call depth, indegree
-- `mcp__orgraph__find_entry_points(kind)` — HTTP handlers and entry surfaces; kind = "all" | "http" | "topology"
-- `mcp__orgraph__get_dependencies(file_path, direction, depth)` — import + call dependency tree
+Once loaded, prefer orgraph over grep/find/Read for any question about how the code works.
+**Always pass `repo` as the absolute path to the current project** with every tool call.
+
+- `mcp__orgraph__search(query, repo)` — hybrid BM25+semantic search over code chunks
+- `mcp__orgraph__trace(symbol, repo, direction, depth)` — follow call chains forward (callees) or backward (callers)
+- `mcp__orgraph__get_context(file_or_symbol, repo)` — topology cluster + community placement, call depth, indegree
+- `mcp__orgraph__find_entry_points(kind, repo)` — HTTP handlers and entry surfaces; kind = "all" | "http" | "topology"
+- `mcp__orgraph__get_dependencies(file_path, repo, direction, depth)` — import + call dependency tree
 
 ### Workflow
 1. Call ToolSearch to load the tools (see above) before the first orgraph call each session.
-2. Start with `mcp__orgraph__search` to find relevant code by description.
-3. Use `mcp__orgraph__trace` to follow call chains — don't read files to discover callers/callees.
-4. Use `mcp__orgraph__get_context` to understand where a file/symbol fits architecturally before editing.
-5. Use `mcp__orgraph__find_entry_points` to map the API surface of an unfamiliar codebase.
-6. Use `mcp__orgraph__get_dependencies` to understand what a file pulls in before refactoring it.
+2. Determine the project root (e.g. `/Users/you/my-project`) — pass it as `repo` to every call.
+3. Start with `mcp__orgraph__search` to find relevant code by description.
+4. Use `mcp__orgraph__trace` to follow call chains — don't read files to discover callers/callees.
+5. Use `mcp__orgraph__get_context` to understand where a file/symbol fits architecturally before editing.
+6. Use `mcp__orgraph__find_entry_points` to map the API surface of an unfamiliar codebase.
+7. Use `mcp__orgraph__get_dependencies` to understand what a file pulls in before refactoring it.
 <!-- ORGRAPH_END -->
 """
 

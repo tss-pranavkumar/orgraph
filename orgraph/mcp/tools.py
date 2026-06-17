@@ -1,11 +1,14 @@
 """MCP tool implementations for orgraph.
 
-All tools are registered onto a FastMCP instance via register_tools().
-Context is held in a mutable State so the reindex tool can swap in fresh
-index/topology without restarting the server.
+All tools accept an optional `repo` argument (absolute path to the project).
+If omitted, the server falls back to the repo it was started with (if any).
+
+This lets orgraph run as a single global MCP server shared across all projects,
+matching semble's pattern of passing `repo` per tool call.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,7 +23,6 @@ class State:
     communities: dict[int, list[str]] | None
     repo_path: Path
 
-    # derived lookups — rebuilt whenever topology/communities change
     uid_to_community: dict[str, int] = field(default_factory=dict)
     cluster_by_id: dict[str, Any] = field(default_factory=dict)
 
@@ -36,44 +38,116 @@ class State:
         )
 
 
-def register_tools(
-    mcp,
-    db,
-    idx,
-    topology,
-    communities: dict[int, list[str]] | None,
-    repo_path: Path,
-) -> dict[str, Any]:
-    """Register all orgraph tools on a FastMCP instance.
+# ── Module-level repo state cache ────────────────────────────────────────────
+# Maps resolved repo path string → State.  Populated lazily per call.
+_repo_states: dict[str, State] = {}
+_repo_lock = threading.Lock()
+_startup_repo: Path | None = None  # set by server.py; default when repo="" in tool calls
 
-    Returns a dict of {tool_name: fn} so callers (e.g. tests) can invoke
-    tools directly without going through the FastMCP async layer.
-    """
-    state = State(db=db, idx=idx, topology=topology, communities=communities, repo_path=repo_path)
+_LOADING: dict = {"status": "orgraph is indexing this repo — try again in a moment"}
+_NOT_READY: dict = {"status": "orgraph is not ready. Run `orgraph index <repo>` first or wait for auto-index to complete."}
+
+
+def _resolve_repo(repo_arg: str) -> Path | None:
+    if repo_arg:
+        return Path(repo_arg).expanduser().resolve()
+    return _startup_repo
+
+
+def _bg_load(state: State, repo_path: Path) -> None:
+    """Ensure index exists, then load DB/search/topology/communities into state."""
+    try:
+        _ensure_indexed(repo_path)
+        _load_into_state(state, repo_path)
+    except Exception as exc:
+        import sys
+        print(f"orgraph: background load failed for {repo_path.name}: {exc}", file=sys.stderr)
+
+
+def _ensure_indexed(repo_path: Path) -> None:
+    import sys
+    orgraph_dir = repo_path / ".orgraph"
+    db_path = orgraph_dir / "graph.kuzu"
+    if db_path.exists() and not db_path.is_dir():
+        db_path.unlink()
+    if db_path.exists():
+        return
+    print(f"orgraph: no index found for {repo_path.name} — indexing now…", file=sys.stderr)
+    from click.testing import CliRunner
+    from orgraph.cli import index
+    result = CliRunner().invoke(index, [str(repo_path)])
+    if result.exit_code != 0:
+        print(f"orgraph: auto-index failed\n{result.output}", file=sys.stderr)
+
+
+def _load_into_state(state: State, repo_path: Path) -> None:
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.search.index import SearchIndex
+    from orgraph.topology.serialise import load_communities, load_topology
+
+    orgraph_dir = repo_path / ".orgraph"
+    db_path = orgraph_dir / "graph.kuzu"
+    if not db_path.exists():
+        return
+    state.db = OrgraphDB(db_path)
+    state.idx = SearchIndex.load(repo_path)
+    state.topology = load_topology(orgraph_dir)
+    state.communities = load_communities(orgraph_dir)
     state.rebuild_lookups()
 
-    # convenience shorthands — always read through state so reindex stays live
-    def _uid_to_community() -> dict[str, int]:
-        return state.uid_to_community
 
-    def _cluster_by_id() -> dict[str, Any]:
-        return state.cluster_by_id
+def _get_state(repo_arg: str) -> State | None:
+    """Return the State for the given repo, loading it if needed."""
+    repo_path = _resolve_repo(repo_arg)
+    if repo_path is None:
+        return None
+    key = str(repo_path)
+    with _repo_lock:
+        if key not in _repo_states:
+            state = State(db=None, idx=None, topology=None, communities=None, repo_path=repo_path)
+            state.rebuild_lookups()
+            _repo_states[key] = state
+            threading.Thread(target=_bg_load, args=(state, repo_path), daemon=True).start()
+    return _repo_states[key]
 
-    _LOADING = {"status": "orgraph is indexing this repo — try again in a moment"}
 
-    def _ready() -> bool:
-        return state.db is not None
+def _no_repo_error(repo_arg: str) -> dict:
+    return {
+        "error": (
+            "No repo specified and no default configured. "
+            "Pass `repo` as the absolute path to your project. "
+            f"Example: repo='/Users/you/my-project'"
+        )
+    }
+
+
+def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
+    """Register all orgraph tools on a FastMCP instance.
+
+    startup_repo: if provided, pre-warms the state cache for that repo in background.
+    Returns a dict of {tool_name: fn} for direct invocation in tests.
+    """
+    global _startup_repo
+    _startup_repo = startup_repo
+
+    # Pre-warm startup repo immediately
+    if startup_repo:
+        _get_state("")  # triggers background load for startup_repo
 
     # ── Tool 1: search ──────────────────────────────────────────────────────
 
     @mcp.tool()
-    def search(query: str, top_k: int = 10) -> list[dict[str, Any]]:
+    def search(query: str, repo: str = "", top_k: int = 10) -> list[dict[str, Any]]:
         """Hybrid BM25+semantic search over code chunks in this repo.
 
         Returns ranked results with file location and a code snippet.
         Use this to find relevant functions, classes, or logic by description.
+        Pass `repo` as the absolute path to the project (e.g. repo='/path/to/project').
         """
-        if not _ready():
+        state = _get_state(repo)
+        if state is None:
+            return [_no_repo_error(repo)]
+        if state.db is None:
             return [_LOADING]
         if state.idx is None:
             return [{"error": "Search index not built. Re-run `orgraph index`."}]
@@ -96,6 +170,7 @@ def register_tools(
     @mcp.tool()
     def trace(
         symbol: str,
+        repo: str = "",
         direction: str = "callees",
         depth: int = 3,
     ) -> dict[str, Any]:
@@ -103,13 +178,15 @@ def register_tools(
 
         direction: 'callees' (what this symbol calls) or 'callers' (what calls it).
         depth: how many hops to follow (max 5).
-        Returns the root symbol and its call chain with file locations.
+        Pass `repo` as the absolute path to the project.
         """
-        if not _ready():
+        state = _get_state(repo)
+        if state is None:
+            return _no_repo_error(repo)
+        if state.db is None:
             return _LOADING
         depth = min(depth, 5)
 
-        # Find root nodes matching symbol name (Function first, then Class)
         roots = state.db.query_to_dicts(
             "MATCH (f:Function) WHERE f.name = $name "
             "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 5",
@@ -122,7 +199,6 @@ def register_tools(
                 {"name": symbol},
             )
         if not roots:
-            # Try substring match across both labels
             roots = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name CONTAINS $name "
                 "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 3",
@@ -185,36 +261,37 @@ def register_tools(
             "root_line": root.get("line") or 0,
             "direction": direction,
             "found": True,
-            "chain": chain[:100],  # cap to 100 edges
+            "chain": chain[:100],
         }
 
     # ── Tool 3: get_context ─────────────────────────────────────────────────
 
     @mcp.tool()
-    def get_context(file_or_symbol: str) -> dict[str, Any]:
+    def get_context(file_or_symbol: str, repo: str = "") -> dict[str, Any]:
         """Return architectural context for a file path or symbol name.
 
-        Looks up which topology cluster owns it, which Leiden community
-        it belongs to, related entry points, and call-depth information.
-        Use this to understand where a file/symbol fits in the codebase.
+        Looks up topology cluster, Leiden community, call depth, and indegree.
+        Pass `repo` as the absolute path to the project.
         """
-        if not _ready():
+        state = _get_state(repo)
+        if state is None:
+            return _no_repo_error(repo)
+        if state.db is None:
             return _LOADING
-        file_path: str | None = None
 
-        # Heuristic: if it has path separators or a file extension, treat as file
+        file_path: str | None = None
+        uid: str | None = None
+
         if "/" in file_or_symbol or "\\" in file_or_symbol or (
             "." in Path(file_or_symbol).name
         ):
             file_path = file_or_symbol
-            # Try to resolve to absolute path
             candidate = Path(file_or_symbol)
             if not candidate.is_absolute():
                 candidate = state.repo_path / file_or_symbol
             if candidate.exists():
                 file_path = str(candidate.resolve())
         else:
-            # Symbol name — find its file from Kuzu (Function first, then Class)
             rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name = $name "
                 "RETURN f.path AS path, f.uid AS uid LIMIT 1",
@@ -229,20 +306,19 @@ def register_tools(
             if rows:
                 file_path = rows[0]["path"]
                 uid = rows[0]["uid"]
-                community_id = state.uid_to_community.get(uid)
             else:
                 return {"query": file_or_symbol, "found": False}
 
         if not state.topology or not file_path:
             return {"query": file_or_symbol, "found": False}
 
-        # Cluster lookup
         cluster_id = state.topology.file_cluster_id.get(file_path)
         cluster = state.cluster_by_id.get(cluster_id) if cluster_id else None
 
-        # Community lookup (for file: check all symbols in that file)
         community_id_for_file: int | None = None
-        if file_path:
+        if uid:
+            community_id_for_file = state.uid_to_community.get(uid)
+        if community_id_for_file is None:
             rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.path = $path RETURN f.uid AS uid LIMIT 20",
                 {"path": file_path},
@@ -253,13 +329,10 @@ def register_tools(
                     community_id_for_file = cid
                     break
 
-        # Symbol-level indegree: count incoming CALLS edges for this uid when available,
-        # otherwise fall back to file-level indegree from topology.
-        uid_for_indegree: str | None = locals().get("uid")  # set above if symbol path was taken
-        if uid_for_indegree:
+        if uid:
             indegree_rows = state.db.query_to_dicts(
                 "MATCH (caller)-[:CALLS]->(target) WHERE target.uid = $uid RETURN count(*) AS n",
-                {"uid": uid_for_indegree},
+                {"uid": uid},
             )
             indegree = indegree_rows[0]["n"] if indegree_rows else 0
         else:
@@ -278,26 +351,25 @@ def register_tools(
             "call_depth": state.topology.file_call_depth.get(file_path),
             "indegree": indegree,
         }
-
-        # Related files in same cluster
         if cluster:
             result["cluster_related_files"] = [
                 f for f in cluster.all_files[:10] if f != file_path
             ]
-
         return result
 
     # ── Tool 4: find_entry_points ───────────────────────────────────────────
 
     @mcp.tool()
-    def find_entry_points(kind: str = "all") -> list[dict[str, Any]]:
+    def find_entry_points(kind: str = "all", repo: str = "") -> list[dict[str, Any]]:
         """Return detected entry points grouped by topology cluster.
 
         kind: 'all' | 'http' (HTTP handlers only) | 'tasks' (async tasks only).
-        Entry points are the outermost callable surfaces of the codebase —
-        HTTP handlers, CLI commands, async task workers, etc.
+        Pass `repo` as the absolute path to the project.
         """
-        if not _ready():
+        state = _get_state(repo)
+        if state is None:
+            return [_no_repo_error(repo)]
+        if state.db is None:
             return [_LOADING]
         if not state.topology:
             return [{"error": "No topology data. Re-run `orgraph index`."}]
@@ -305,7 +377,6 @@ def register_tools(
         out: list[dict[str, Any]] = []
 
         if kind in ("all", "http"):
-            # HTTP handlers from Kuzu (have http_method populated)
             rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.http_method <> '' "
                 "RETURN f.name AS name, f.path AS path, f.line_number AS line, "
@@ -324,7 +395,6 @@ def register_tools(
                 })
 
         if kind in ("all", "topology"):
-            # BFS entry files from topology clusters (depth 0)
             for cluster in state.topology.clusters:
                 if cluster.is_foundational:
                     continue
@@ -338,7 +408,6 @@ def register_tools(
                     })
 
         if kind == "all" and not out:
-            # Fallback: indegree-0 non-foundational files
             for f, depth in state.topology.file_call_depth.items():
                 if depth == 0 and state.topology.file_indegree.get(f, 0) == 0:
                     cluster_id = state.topology.file_cluster_id.get(f)
@@ -355,6 +424,7 @@ def register_tools(
     @mcp.tool()
     def get_dependencies(
         file_path: str,
+        repo: str = "",
         direction: str = "imports",
         depth: int = 2,
     ) -> dict[str, Any]:
@@ -362,25 +432,25 @@ def register_tools(
 
         direction: 'imports' (what this file imports) or 'imported_by' (reverse).
         depth: how many levels to traverse (max 3).
-        Uses the IMPORTS and CONTAINS graph edges for traversal.
+        Pass `repo` as the absolute path to the project.
         """
-        if not _ready():
+        state = _get_state(repo)
+        if state is None:
+            return _no_repo_error(repo)
+        if state.db is None:
             return _LOADING
         depth = min(depth, 3)
 
-        # Resolve to absolute path
         candidate = Path(file_path)
         if not candidate.is_absolute():
             candidate = state.repo_path / file_path
         abs_path = str(candidate.resolve()) if candidate.exists() else file_path
 
-        # Check file exists in graph
         file_rows = state.db.query_to_dicts(
             "MATCH (f:File {path: $path}) RETURN f.path AS path LIMIT 1",
             {"path": abs_path},
         )
         if not file_rows:
-            # Try by name match
             name = Path(file_path).name
             file_rows = state.db.query_to_dicts(
                 "MATCH (f:File) WHERE f.name = $name RETURN f.path AS path LIMIT 1",
@@ -399,7 +469,6 @@ def register_tools(
                 continue
 
             if direction == "imports":
-                # Direct imports via IMPORTS edges (File→Module)
                 rows = state.db.query_to_dicts(
                     "MATCH (f:File {path: $path})-[r:IMPORTS]->(m:Module) "
                     "RETURN m.name AS name, m.path AS mpath, r.alias AS alias LIMIT 50",
@@ -418,7 +487,6 @@ def register_tools(
                         visited.add(target)
                         frontier.append((target, d + 1))
 
-                # Also: CALLS-based dependencies (functions this file calls in other files)
                 rows2 = state.db.query_to_dicts(
                     "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
                     "WHERE caller.path = $path AND callee.path <> $path "
@@ -438,7 +506,7 @@ def register_tools(
                         })
                         frontier.append((dep, d + 1))
 
-            else:  # imported_by
+            else:
                 rows = state.db.query_to_dicts(
                     "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
                     "WHERE callee.path = $path AND caller.path <> $path "
@@ -469,12 +537,12 @@ def register_tools(
     # ── Tool 6: reindex ─────────────────────────────────────────────────────
 
     @mcp.tool()
-    def reindex(force: bool = False) -> dict[str, Any]:
+    def reindex(repo: str = "", force: bool = False) -> dict[str, Any]:
         """Re-index this repo to pick up new, modified, or deleted files.
 
         Detects changes via file-hash manifest — only re-extracts what changed.
-        Use force=True to re-index everything regardless of changes.
-        After reindex, all other tools automatically use the updated graph.
+        Use force=True to re-index everything.
+        Pass `repo` as the absolute path to the project.
         """
         import time
         from orgraph.extract.manifest import Manifest
@@ -490,42 +558,42 @@ def register_tools(
         )
         from orgraph.topology.topology import build_topology_map
 
-        repo = state.repo_path
-        orgraph_dir = repo / ".orgraph"
+        state = _get_state(repo)
+        if state is None:
+            return _no_repo_error(repo)
+        if state.db is None:
+            return _LOADING
+
+        repo_path = state.repo_path
+        orgraph_dir = repo_path / ".orgraph"
         t0 = time.perf_counter()
 
         manifest = Manifest(orgraph_dir)
         manifest.load()
 
         if force:
-            changed = manifest.all_files(repo)
+            changed = manifest.all_files(repo_path)
             deleted: list[str] = []
         else:
-            changed = manifest.changed_files(repo)
-            deleted = manifest.deleted_files(repo)
+            changed = manifest.changed_files(repo_path)
+            deleted = manifest.deleted_files(repo_path)
 
         if not changed and not deleted:
             return {"status": "up_to_date", "changed_files": 0, "deleted_files": 0}
 
-        builder = GraphBuilder(db=state.db, repo_path=repo)
+        builder = GraphBuilder(db=state.db, repo_path=repo_path)
 
-        # Delete nodes for removed files
         deleted_nodes = 0
         for path_str in deleted:
             deleted_nodes += builder.delete_file_nodes(path_str)
         manifest.remove(deleted)
 
-        # Re-extract and re-ingest changed/new files
         nodes_added = 0
         if changed:
-            # delete stale nodes for changed files first (functions may have been renamed)
             for p in changed:
                 builder.delete_file_nodes(str(p))
 
-            ts = TreeSitterExtractor(repo_path=repo)
-            # Override: extract only changed files
-            import sys
-            graphify_src = ts.__class__.__module__
+            ts = TreeSitterExtractor(repo_path=repo_path)
             from orgraph._vendor.extract import extract as _extract
             raw = _extract(changed, cache_root=None, parallel=True)
             result = ts._convert(raw)
@@ -533,13 +601,10 @@ def register_tools(
             create_schema(state.db)
             nodes_added, _ = builder.ingest(result)
 
-            # Rebuild topology + communities
-            ctx = build_repo_context(result, repo)
+            ctx = build_repo_context(result, repo_path)
             topology = build_topology_map(ctx)
-            from orgraph.extract.treesitter import TreeSitterExtractor as _TSE
-            # build full graph for Leiden (need all nodes, not just changed)
-            full_ts = _TSE(repo_path=repo)
-            full_raw = _extract(manifest.all_files(repo), cache_root=None, parallel=True)
+            full_ts = TreeSitterExtractor(repo_path=repo_path)
+            full_raw = _extract(manifest.all_files(repo_path), cache_root=None, parallel=True)
             full_result = full_ts._convert(full_raw)
             G = build_nx_graph_from_result(full_result)
             communities = cluster(G)
@@ -547,11 +612,9 @@ def register_tools(
             save_topology(topology, orgraph_dir)
             save_communities(communities, orgraph_dir)
 
-            # Rebuild search index
-            SearchIndex.build(repo)
-            new_idx = SearchIndex.load(repo)
+            SearchIndex.build(repo_path)
+            new_idx = SearchIndex.load(repo_path)
 
-            # Swap state in-place — all tools see fresh data immediately
             state.idx = new_idx
             state.topology = topology
             state.communities = communities
