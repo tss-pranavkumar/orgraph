@@ -74,17 +74,29 @@ def register_tools(
         """
         depth = min(depth, 5)
 
-        # Find root nodes matching symbol name
+        # Find root nodes matching symbol name (Function first, then Class)
         roots = db.query_to_dicts(
             "MATCH (f:Function) WHERE f.name = $name "
             "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 5",
             {"name": symbol},
         )
         if not roots:
-            # Try substring match
+            roots = db.query_to_dicts(
+                "MATCH (c:Class) WHERE c.name = $name "
+                "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 5",
+                {"name": symbol},
+            )
+        if not roots:
+            # Try substring match across both labels
             roots = db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name CONTAINS $name "
                 "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 3",
+                {"name": symbol},
+            )
+        if not roots:
+            roots = db.query_to_dicts(
+                "MATCH (c:Class) WHERE c.name CONTAINS $name "
+                "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 3",
                 {"name": symbol},
             )
         if not roots:
@@ -104,14 +116,14 @@ def register_tools(
 
             if direction == "callees":
                 edges = db.query_to_dicts(
-                    "MATCH (f:Function {uid: $uid})-[r:CALLS]->(c:Function) "
+                    "MATCH (f)-[r:CALLS]->(c) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
                     "c.line_number AS line, r.confidence AS confidence LIMIT 30",
                     {"uid": uid},
                 )
             else:
                 edges = db.query_to_dicts(
-                    "MATCH (c:Function)-[r:CALLS]->(f:Function {uid: $uid}) "
+                    "MATCH (c)-[r:CALLS]->(f) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
                     "c.line_number AS line, r.confidence AS confidence LIMIT 30",
                     {"uid": uid},
@@ -165,12 +177,18 @@ def register_tools(
             if candidate.exists():
                 file_path = str(candidate.resolve())
         else:
-            # Symbol name — find its file from Kuzu
+            # Symbol name — find its file from Kuzu (Function first, then Class)
             rows = db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name = $name "
                 "RETURN f.path AS path, f.uid AS uid LIMIT 1",
                 {"name": file_or_symbol},
             )
+            if not rows:
+                rows = db.query_to_dicts(
+                    "MATCH (c:Class) WHERE c.name = $name "
+                    "RETURN c.path AS path, c.uid AS uid LIMIT 1",
+                    {"name": file_or_symbol},
+                )
             if rows:
                 file_path = rows[0]["path"]
                 uid = rows[0]["uid"]
@@ -198,6 +216,18 @@ def register_tools(
                     community_id_for_file = cid
                     break
 
+        # Symbol-level indegree: count incoming CALLS edges for this uid when available,
+        # otherwise fall back to file-level indegree from topology.
+        uid_for_indegree: str | None = locals().get("uid")  # set above if symbol path was taken
+        if uid_for_indegree:
+            indegree_rows = db.query_to_dicts(
+                "MATCH (caller)-[:CALLS]->(target) WHERE target.uid = $uid RETURN count(*) AS n",
+                {"uid": uid_for_indegree},
+            )
+            indegree = indegree_rows[0]["n"] if indegree_rows else 0
+        else:
+            indegree = topology.file_indegree.get(file_path, 0)
+
         result: dict[str, Any] = {
             "query": file_or_symbol,
             "file_path": file_path,
@@ -209,7 +239,7 @@ def register_tools(
             "is_foundational": cluster.is_foundational if cluster else False,
             "community_id": community_id_for_file,
             "call_depth": topology.file_call_depth.get(file_path),
-            "indegree": topology.file_indegree.get(file_path, 0),
+            "indegree": indegree,
         }
 
         # Related files in same cluster
