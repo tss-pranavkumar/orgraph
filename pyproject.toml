@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orgraph-mcp"
-version = "0.1.18"
+version = "0.1.19"
 description = "Codebase knowledge graph MCP server — call chains, topology, and hybrid search for coding agents"
 readme = "README.md"
 license = { text = "MIT" }
@@ -56,6 +56,7 @@ orgraph = "orgraph.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["orgraph"]
+include = ["orgraph/agents/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Callable, NoReturn, Sequence, TypeVar
 
@@ -12,9 +13,9 @@ from orgraph.installer.agents import (
     AGENTS,
     AGENTS_MD_BLOCK,
     CLAUDE_MD_BLOCK,
-    Action,
     AgentTarget,
     Mode,
+    WriteResult,
     get_mcp_entry,
     get_opencode_mcp_entry,
     is_detected,
@@ -24,10 +25,8 @@ from orgraph.installer.config import (
     _remove_stale_project_scoped,
     claude_mcp_add,
     claude_mcp_remove,
-    merge_claude_mcp,
     merge_json_mcp,
     merge_toml_mcp,
-    remove_claude_mcp,
     remove_instructions,
     remove_json_mcp,
     remove_toml_mcp,
@@ -41,11 +40,10 @@ _DIM = "\033[2m"
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
 
-
-@dataclass(frozen=True)
-class WriteResult:
-    path: Path
-    action: Action
+_ACTION_DETAIL: dict[str, str] = {
+    "skipped": "JSON5 grammar unavailable — add manually (see README)",
+    "error": "could not parse or edit config",
+}
 
 
 @dataclass(frozen=True)
@@ -60,14 +58,15 @@ class Integration:
 def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) -> WriteResult | None:
     if agent.mcp is None:
         return None
-    path, key = agent.mcp.path, agent.mcp.key
+    path = agent.mcp.path
 
-    # Use the currently-running orgraph binary so we don't re-fetch from PyPI
+    if agent.mcp.format == "toml":
+        action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
+        return WriteResult(path, action)
+
     entry = get_opencode_mcp_entry() if agent.id == "opencode" else get_mcp_entry()
 
-    if key == "mcp_servers":  # TOML (Codex)
-        action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
-    elif agent.id == "claude":
+    if agent.id == "claude":
         # Use `claude mcp add/remove` so Claude Code owns the config format.
         # Also wipe stale project-scoped entries to prevent scope conflicts.
         bin_ = entry["command"] if isinstance(entry.get("command"), str) else str(entry.get("command", ""))
@@ -78,11 +77,10 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
         else:
             action = claude_mcp_remove("orgraph", scope="user")
     elif mode == "install":
-        # Bake abs repo path into args for all other agents too (replaces "." placeholder)
         baked = _bake_repo_path(entry, repo_path) if repo_path else entry
-        action = merge_json_mcp(path, key, baked)
+        action = merge_json_mcp(path, agent.mcp.key, baked)
     else:
-        action = remove_json_mcp(path, key)
+        action = remove_json_mcp(path, agent.mcp.key)
     return WriteResult(path, action)
 
 
@@ -95,13 +93,33 @@ def _apply_instructions(agent: AgentTarget, mode: Mode, repo_path: Path | None =
     return WriteResult(path, action)
 
 
+def _apply_subagent(agent: AgentTarget, mode: Mode) -> WriteResult | None:
+    """Write or remove the per-agent sub-agent .md file."""
+    dest = agent.subagent_path
+    if dest is None:
+        return None
+    if mode == "uninstall":
+        if not dest.exists():
+            return WriteResult(dest, "not-found")
+        dest.unlink()
+        return WriteResult(dest, "removed")
+    existed = dest.exists()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        content = files("orgraph").joinpath(f"agents/{agent.id}.md").read_text(encoding="utf-8")
+        dest.write_text(content, encoding="utf-8")
+    except Exception:
+        return WriteResult(dest, "error")
+    return WriteResult(dest, "updated" if existed else "created")
+
+
 _INTEGRATIONS: list[Integration] = [
     Integration(
         "mcp",
         "MCP server",
         "lets the agent call orgraph tools directly",
         _apply_mcp,  # type: ignore[arg-type]  # repo_path injected at call site
-        lambda a: a.mcp.path if a.mcp else None,
+        AgentTarget.resolved_mcp_path,
     ),
     Integration(
         "instructions",
@@ -109,6 +127,13 @@ _INTEGRATIONS: list[Integration] = [
         "adds tool usage guidance to CLAUDE.md / AGENTS.md",
         _apply_instructions,
         lambda a: a.instructions_path,
+    ),
+    Integration(
+        "subagent",
+        "Sub-agent",
+        "installs a dedicated orgraph-explore sub-agent",
+        _apply_subagent,
+        lambda a: a.subagent_path,
     ),
 ]
 
@@ -160,7 +185,9 @@ def _apply_all(mode: Mode, agents: list[AgentTarget], integrations: list[Integra
                 print(f"    {_DIM}– {integ.id}: not supported{_RESET}")
                 continue
             ok = result.action in ("created", "updated", "removed", "unchanged")
-            print(f"    {_tick(ok)} {integ.id} ({result.action}) → {result.path}")
+            detail = _ACTION_DETAIL.get(result.action, "")
+            suffix = f" — {detail}" if detail else ""
+            print(f"    {_tick(ok)} {integ.id} ({result.action}){suffix} → {result.path}")
         print()
 
 
@@ -186,8 +213,9 @@ def run(mode: Mode, repo_path: Path | None = None) -> None:
         agent_items,
     ) or _exit("Nothing selected. Exiting.")
 
+    max_label = max(len(i.label) for i in _INTEGRATIONS)
     integ_items = [
-        (f"{i.label:<13}  —  {i.desc}", i, True)
+        (f"{i.label:<{max_label}}  —  {i.desc}", i, True)
         for i in _INTEGRATIONS
     ]
     chosen_integrations = _checkbox(

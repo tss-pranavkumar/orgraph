@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.19 - 2026-06-17
+
+### Changed
+- **Conformed with semble installer pattern**: `orgraph install` now supports a third integration — **Sub-agent** — which writes a dedicated `orgraph-explore` sub-agent file to each agent's global agents directory (e.g. `~/.claude/agents/orgraph-explore.md`). Sub-agent files are loaded from package resources (`orgraph/agents/<id>.md`) via `importlib.resources`.
+- Added 8 new agent targets: Kiro, Windsurf, Zed, Reasonix, Pi, Command Code, GitHub Copilot, Antigravity — matching the full semble agent list.
+- `McpConfig` now has a `format: Literal["json", "toml"]` field (default `"json"`); TOML detection uses `format == "toml"` instead of checking the key name.
+- `WriteResult` moved to `agents.py` (matches semble pattern).
+- `AgentTarget` now has `subagent_path: Path | None` and a `resolved_mcp_path()` method.
+- Integration label width is now dynamic (`max(len(i.label))`), not hardcoded.
+- `_ACTION_DETAIL` dict added for human-readable error/skipped messages in installer output.
+
 ## 0.1.18 - 2026-06-17
 
 ### Changed
