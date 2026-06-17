@@ -59,6 +59,11 @@ def register_tools(
     def _cluster_by_id() -> dict[str, Any]:
         return state.cluster_by_id
 
+    _LOADING = {"status": "orgraph is indexing this repo — try again in a moment"}
+
+    def _ready() -> bool:
+        return state.db is not None
+
     # ── Tool 1: search ──────────────────────────────────────────────────────
 
     @mcp.tool()
@@ -68,6 +73,8 @@ def register_tools(
         Returns ranked results with file location and a code snippet.
         Use this to find relevant functions, classes, or logic by description.
         """
+        if not _ready():
+            return [_LOADING]
         if state.idx is None:
             return [{"error": "Search index not built. Re-run `orgraph index`."}]
         results = state.idx.search(query, top_k=top_k)
@@ -98,6 +105,8 @@ def register_tools(
         depth: how many hops to follow (max 5).
         Returns the root symbol and its call chain with file locations.
         """
+        if not _ready():
+            return _LOADING
         depth = min(depth, 5)
 
         # Find root nodes matching symbol name (Function first, then Class)
@@ -189,6 +198,8 @@ def register_tools(
         it belongs to, related entry points, and call-depth information.
         Use this to understand where a file/symbol fits in the codebase.
         """
+        if not _ready():
+            return _LOADING
         file_path: str | None = None
 
         # Heuristic: if it has path separators or a file extension, treat as file
@@ -286,6 +297,8 @@ def register_tools(
         Entry points are the outermost callable surfaces of the codebase —
         HTTP handlers, CLI commands, async task workers, etc.
         """
+        if not _ready():
+            return [_LOADING]
         if not state.topology:
             return [{"error": "No topology data. Re-run `orgraph index`."}]
 
@@ -351,6 +364,8 @@ def register_tools(
         depth: how many levels to traverse (max 3).
         Uses the IMPORTS and CONTAINS graph edges for traversal.
         """
+        if not _ready():
+            return _LOADING
         depth = min(depth, 3)
 
         # Resolve to absolute path

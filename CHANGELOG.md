@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 - 2026-06-17
+
+### Fixed
+- MCP server now starts in <1s instead of 60s+ — was blocking stdio handshake while auto-indexing, causing Claude Code to time out and show "Failed to connect". Indexing now runs in a background thread; tools return "indexing in progress" until ready.
+
 ## 0.1.4 - 2026-06-17
 
 ### Fixed
