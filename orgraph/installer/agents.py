@@ -129,7 +129,11 @@ AGENTS: list[AgentTarget] = [
         display_name="Opencode",
         binary="opencode",
         config_dir=_HOME / ".config" / "opencode",
-        mcp=McpConfig(_HOME / ".config" / "opencode" / "opencode.json", "mcp", _MCP_ENTRY),
+        mcp=McpConfig(
+            _HOME / ".config" / "opencode" / "opencode.json",
+            "mcp",
+            {**_MCP_ENTRY, "type": "local", "enabled": True},
+        ),
         instructions_path=_HOME / ".config" / "opencode" / "AGENTS.md",
     ),
 ]

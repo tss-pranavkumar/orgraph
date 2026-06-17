@@ -51,46 +51,51 @@ def remove_json_mcp(path: Path, key: str) -> Action:
 # ── TOML helper (Codex uses config.toml) ─────────────────────────────────────
 
 def merge_toml_mcp(path: Path) -> Action:
-    """Append an [[mcp_servers]] block for orgraph to a TOML config."""
+    """Add [mcp_servers.orgraph] block to a Codex config.toml."""
     path.parent.mkdir(parents=True, exist_ok=True)
     block = (
-        '\n[[mcp_servers]]\n'
-        'name = "orgraph"\n'
+        '\n[mcp_servers.orgraph]\n'
         'command = "uvx"\n'
         'args = ["--from", "orgraph-mcp", "orgraph", "serve", "."]\n'
     )
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    if "orgraph" in existing:
+    if "[mcp_servers.orgraph]" in existing:
         return "unchanged"
+    # Remove any stale [[mcp_servers]] array-of-tables entry we may have written before
+    existing = _remove_array_mcp_block(existing)
     path.write_text(existing + block, encoding="utf-8")
     return "created" if not existing.strip() else "updated"
 
 
+def _remove_array_mcp_block(text: str) -> str:
+    """Remove a stale [[mcp_servers]] array-of-tables block for orgraph if present."""
+    import re
+    return re.sub(
+        r'\n\[\[mcp_servers\]\]\nname = "orgraph"\n(?:[^\[].*)?\n?',
+        '',
+        text,
+        flags=re.MULTILINE,
+    )
+
+
 def remove_toml_mcp(path: Path) -> Action:
-    """Remove the orgraph [[mcp_servers]] block from a TOML config."""
+    """Remove the [mcp_servers.orgraph] block from a Codex config.toml."""
     if not path.exists():
         return "not-found"
+    import re
     text = path.read_text(encoding="utf-8")
     if "orgraph" not in text:
         return "not-found"
-    lines = text.splitlines(keepends=True)
-    out, skip = [], False
-    for line in lines:
-        if line.strip() == "[[mcp_servers]]":
-            # peek ahead: if next non-empty line has orgraph, skip this block
-            skip = False  # reset; handled below
-        if skip and line.strip().startswith("[["):
-            skip = False
-        if not skip:
-            out.append(line)
-        if 'name = "orgraph"' in line:
-            # remove the block we just added (last [[mcp_servers]] in out)
-            while out and out[-1].strip() != "[[mcp_servers]]":
-                out.pop()
-            if out:
-                out.pop()
-            skip = True
-    path.write_text("".join(out), encoding="utf-8")
+    # Remove [mcp_servers.orgraph] table and its keys (stop at next [section])
+    cleaned = re.sub(
+        r'\n\[mcp_servers\.orgraph\]\n(?:[^\[].*)?\n?',
+        '',
+        text,
+        flags=re.MULTILINE,
+    )
+    # Also clean up old [[mcp_servers]] array-of-tables format if present
+    cleaned = _remove_array_mcp_block(cleaned)
+    path.write_text(cleaned, encoding="utf-8")
     return "removed"
 
 
