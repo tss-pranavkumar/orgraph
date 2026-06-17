@@ -197,9 +197,13 @@ def status(repo_path: str) -> None:
 @click.option("--top-k", default=10, show_default=True)
 def search(query: str, repo_path: str, top_k: int) -> None:
     """Hybrid BM25+semantic search over a repo's code."""
+    from orgraph.graph import query as gq
+    from orgraph.graph.kuzu import open_db_readonly
     from orgraph.search.index import SearchIndex
 
     repo = Path(repo_path).resolve()
+    db_path = _orgraph_dir(repo) / "graph.kuzu"
+
     idx = SearchIndex.load(repo)
     if idx is None:
         console.print("[red]Search index not built yet. Run `orgraph index` first.[/]")
@@ -210,14 +214,35 @@ def search(query: str, repo_path: str, top_k: int) -> None:
         console.print("[yellow]No results.[/]")
         return
 
-    for i, r in enumerate(results, 1):
-        chunk = r.chunk
-        console.print(
-            f"[bold cyan]{i}.[/] score=[yellow]{r.score:.3f}[/]  "
-            f"[green]{chunk.file_path}[/]:[bold]{chunk.start_line}-{chunk.end_line}[/]"
-        )
-        snippet = chunk.content[:200].replace("\n", " ").strip()
-        console.print(f"   [dim]{snippet}[/]\n")
+    repo_str = str(repo) + "/"
+    top_score = results[0].score if results else 1.0
+
+    def _tier(score: float) -> str:
+        ratio = score / top_score if top_score else 0
+        if ratio >= 0.70:
+            return "[bold green]●●●[/]"
+        if ratio >= 0.40:
+            return "[yellow]●●○[/]"
+        return "[dim]●○○[/]"
+
+    with open_db_readonly(db_path) as db:
+        for i, r in enumerate(results, 1):
+            c = r.chunk
+            rel_path = c.file_path.replace(repo_str, "")
+            sym = gq.get_enclosing_symbol(db, c.file_path, c.start_line)
+            sym_label = (
+                f"[bold cyan]{sym['name']}()[/]  " if sym and sym["kind"] == "function"
+                else f"[bold yellow]{sym['name']}[/]  " if sym
+                else ""
+            )
+            console.print(
+                f"{_tier(r.score)} [bold]{i}.[/]  {sym_label}"
+                f"[green]{rel_path}[/]:[dim]{c.start_line}-{c.end_line}[/]"
+            )
+            snippet = c.content[:300].strip()
+            for line in snippet.splitlines()[:6]:
+                console.print(f"   [dim]{line}[/]")
+            console.print()
 
 
 @main.command()
