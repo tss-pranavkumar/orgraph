@@ -10,8 +10,12 @@ from typing import Literal
 
 _HOME = Path.home()
 
-Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error"]
+Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error", "skipped"]
 Mode = Literal["install", "uninstall"]
+
+ORGRAPH_START = "<!-- ORGRAPH_START -->"
+ORGRAPH_END = "<!-- ORGRAPH_END -->"
+
 
 def _resolve_orgraph_bin() -> str:
     """Return the orgraph binary path that is currently running.
@@ -26,7 +30,6 @@ def _resolve_orgraph_bin() -> str:
             return str(p)
     except Exception:
         pass
-    # Fallback: let the shell find it
     found = shutil.which("orgraph")
     return found or "orgraph"
 
@@ -45,9 +48,19 @@ def get_opencode_mcp_entry() -> dict[str, object]:
     return {"command": [bin_, "serve"], "type": "local", "enabled": True}
 
 
-# Keep module-level names for import compatibility — evaluated lazily at install time
-_MCP_ENTRY: dict[str, object] = {"command": "uvx", "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "stdio"}
-_OPENCODE_MCP_ENTRY: dict[str, object] = {"command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "local", "enabled": True}
+def _get_bare_mcp_entry() -> dict[str, object]:
+    """Bare command/args entry — no 'type' field (for Windsurf, Reasonix, Pi, Copilot, Command Code)."""
+    return {"command": _resolve_orgraph_bin(), "args": ["serve"]}
+
+
+def _get_zed_mcp_entry() -> dict[str, object]:
+    """Zed requires 'source': 'custom' for manually registered servers."""
+    return {"source": "custom", "command": _resolve_orgraph_bin(), "args": ["serve"]}
+
+
+# Lazy module-level stubs for import compatibility — resolved at install time via get_mcp_entry()
+_MCP_ENTRY: dict[str, object] = {"command": "uvx", "args": ["--from", "orgraph-mcp", "orgraph", "serve"], "type": "stdio"}
+_OPENCODE_MCP_ENTRY: dict[str, object] = {"command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve"], "type": "local", "enabled": True}
 
 _ORGRAPH_TOOLS_TABLE = """\
 Always pass `repo` as the absolute path to the current project (the git root) with every call.
@@ -89,7 +102,7 @@ ToolSearch: select:mcp__orgraph__search,mcp__orgraph__trace,mcp__orgraph__get_co
 <!-- ORGRAPH_END -->
 """
 
-# Codex / Gemini CLI / Opencode: MCP tools load automatically, no ToolSearch needed
+# Codex / Gemini CLI / Opencode / Kiro / Reasonix / Command Code: MCP tools load automatically
 AGENTS_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
 ## orgraph — Codebase Knowledge Graph
@@ -102,11 +115,53 @@ The orgraph MCP tools are available as: `orgraph__search`, `orgraph__trace`, `or
 <!-- ORGRAPH_END -->
 """
 
-ORGRAPH_START = "<!-- ORGRAPH_START -->"
-ORGRAPH_END = "<!-- ORGRAPH_END -->"
+
+@dataclass(frozen=True)
+class McpConfig:
+    """MCP integration config for one agent."""
+
+    path: Path
+    key: str
+    entry: dict[str, object]
+    format: Literal["json", "toml"] = "json"
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    """Result of a single file write operation."""
+
+    path: Path
+    action: Action
+
+
+@dataclass(frozen=True)
+class AgentTarget:
+    """Configuration for a single coding agent integration target."""
+
+    id: str
+    display_name: str
+    binary: str | None  # for shutil.which detection
+    config_dir: Path | None  # directory existence check for detection
+    mcp: McpConfig | None
+    instructions_path: Path | None  # None = not supported for this agent
+    subagent_path: Path | None = None  # global (user-level) sub-agent file; None = unsupported
+
+    def resolved_mcp_path(self) -> Path | None:
+        """Return the resolved MCP config path, or None if MCP is unsupported."""
+        return self.mcp.path if self.mcp else None
+
+
+def _opencode_mcp_path() -> Path:
+    """Return the opencode config path, preferring .jsonc over .json."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) / "opencode" if xdg else _HOME / ".config" / "opencode"
+    jsonc = base / "opencode.jsonc"
+    json_ = base / "opencode.json"
+    return jsonc if jsonc.exists() else (json_ if json_.exists() else jsonc)
 
 
 def _vscode_mcp_path() -> Path:
+    """Return the user-level VS Code mcp.json path for the current OS."""
     if sys.platform == "darwin":
         base = _HOME / "Library" / "Application Support" / "Code" / "User"
     elif sys.platform == "win32":
@@ -116,32 +171,8 @@ def _vscode_mcp_path() -> Path:
     return base / "mcp.json"
 
 
-@dataclass(frozen=True)
-class McpConfig:
-    path: Path
-    key: str
-    entry: dict[str, object]
-
-
-@dataclass(frozen=True)
-class AgentTarget:
-    id: str
-    display_name: str
-    binary: str | None
-    config_dir: Path | None
-    mcp: McpConfig | None
-    instructions_path: Path | None  # None = not supported
-
-
-def _opencode_mcp_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) / "opencode" if xdg else _HOME / ".config" / "opencode"
-    jsonc = base / "opencode.jsonc"
-    json_ = base / "opencode.json"
-    return jsonc if jsonc.exists() else (json_ if json_.exists() else jsonc)
-
-
 def is_detected(agent: AgentTarget) -> bool:
+    """Return True if the agent appears to be installed."""
     if agent.binary and shutil.which(agent.binary):
         return True
     return bool(agent.config_dir and agent.config_dir.exists())
@@ -155,6 +186,7 @@ AGENTS: list[AgentTarget] = [
         config_dir=_HOME / ".claude",
         mcp=McpConfig(_HOME / ".claude.json", "mcpServers", _MCP_ENTRY),
         instructions_path=_HOME / ".claude" / "CLAUDE.md",
+        subagent_path=_HOME / ".claude" / "agents" / "orgraph-explore.md",
     ),
     AgentTarget(
         id="cursor",
@@ -163,13 +195,50 @@ AGENTS: list[AgentTarget] = [
         config_dir=_HOME / ".cursor",
         mcp=McpConfig(_HOME / ".cursor" / "mcp.json", "mcpServers", _MCP_ENTRY),
         instructions_path=None,
+        subagent_path=_HOME / ".cursor" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="gemini",
+        display_name="Gemini CLI",
+        binary="gemini",
+        config_dir=_HOME / ".gemini",
+        mcp=McpConfig(_HOME / ".gemini" / "settings.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=_HOME / ".gemini" / "GEMINI.md",
+        subagent_path=_HOME / ".gemini" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="kiro",
+        display_name="Kiro",
+        binary="kiro",
+        config_dir=_HOME / ".kiro",
+        mcp=McpConfig(_HOME / ".kiro" / "settings" / "mcp.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=_HOME / ".kiro" / "steering" / "orgraph.md",
+        subagent_path=_HOME / ".kiro" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="opencode",
+        display_name="Opencode",
+        binary="opencode",
+        config_dir=_HOME / ".config" / "opencode",
+        mcp=McpConfig(_opencode_mcp_path(), "mcp", _OPENCODE_MCP_ENTRY),
+        instructions_path=_HOME / ".config" / "opencode" / "AGENTS.md",
+        subagent_path=_HOME / ".config" / "opencode" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="copilot",
+        display_name="GitHub Copilot",
+        binary=None,
+        config_dir=_HOME / ".config" / "github-copilot",
+        mcp=McpConfig(_HOME / ".copilot" / "mcp-config.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=None,
+        subagent_path=_HOME / ".copilot" / "agents" / "orgraph-explore.agent.md",
     ),
     AgentTarget(
         id="codex",
         display_name="Codex",
         binary="codex",
         config_dir=_HOME / ".codex",
-        mcp=McpConfig(_HOME / ".codex" / "config.toml", "mcp_servers", _MCP_ENTRY),
+        mcp=McpConfig(_HOME / ".codex" / "config.toml", "mcp_servers", _MCP_ENTRY, format="toml"),
         instructions_path=_HOME / ".codex" / "AGENTS.md",
     ),
     AgentTarget(
@@ -181,19 +250,55 @@ AGENTS: list[AgentTarget] = [
         instructions_path=None,
     ),
     AgentTarget(
-        id="gemini",
-        display_name="Gemini CLI",
-        binary="gemini",
-        config_dir=_HOME / ".gemini",
-        mcp=McpConfig(_HOME / ".gemini" / "settings.json", "mcpServers", _MCP_ENTRY),
-        instructions_path=_HOME / ".gemini" / "GEMINI.md",
+        id="windsurf",
+        display_name="Windsurf",
+        binary="windsurf",
+        config_dir=_HOME / ".codeium" / "windsurf",
+        mcp=McpConfig(_HOME / ".codeium" / "windsurf" / "mcp_config.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=None,
     ),
     AgentTarget(
-        id="opencode",
-        display_name="Opencode",
-        binary="opencode",
-        config_dir=_HOME / ".config" / "opencode",
-        mcp=McpConfig(_opencode_mcp_path(), "mcp", _OPENCODE_MCP_ENTRY),
-        instructions_path=_HOME / ".config" / "opencode" / "AGENTS.md",
+        id="zed",
+        display_name="Zed",
+        binary="zed",
+        config_dir=_HOME / ".config" / "zed",
+        mcp=McpConfig(_HOME / ".config" / "zed" / "settings.json", "context_servers", _MCP_ENTRY),
+        instructions_path=None,
+    ),
+    AgentTarget(
+        id="reasonix",
+        display_name="Reasonix",
+        binary="reasonix",
+        config_dir=_HOME / ".config" / "reasonix",
+        mcp=McpConfig(_HOME / ".reasonix" / "config.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=_HOME / ".config" / "reasonix" / "REASONIX.md",
+        subagent_path=_HOME / ".reasonix" / "skills" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="pi",
+        display_name="Pi",
+        binary="pi",
+        config_dir=_HOME / ".pi",
+        mcp=McpConfig(_HOME / ".pi" / "agent" / "mcp.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=None,
+        subagent_path=_HOME / ".pi" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="commandcode",
+        display_name="Command Code",
+        binary=None,
+        config_dir=_HOME / ".commandcode",
+        mcp=McpConfig(_HOME / ".commandcode" / "mcp.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=_HOME / ".commandcode" / "AGENTS.md",
+        subagent_path=_HOME / ".commandcode" / "agents" / "orgraph-explore.md",
+    ),
+    AgentTarget(
+        id="antigravity",
+        display_name="Antigravity",
+        binary="agy",
+        config_dir=_HOME / ".gemini" / "antigravity-cli",
+        mcp=McpConfig(_HOME / ".gemini" / "config" / "mcp_config.json", "mcpServers", _MCP_ENTRY),
+        instructions_path=_HOME / ".gemini" / "GEMINI.md",
+        subagent_path=_HOME / ".gemini" / "config" / "skills" / "orgraph-explore" / "SKILL.md",
     ),
 ]
