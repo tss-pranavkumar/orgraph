@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.21 - 2026-06-17
+
+### Added
+- **`orgraph who-calls <symbol> <repo>`** — shows every caller of a function with file + line, works even while MCP server is running
+- **`orgraph trace <symbol> <repo>`** — prints the full call chain (what a function calls, indented by depth); `--callers` flag reverses direction; `--depth N` controls hops
+- **`orgraph file <path> <repo>`** — lists all functions and classes defined in a file, ordered by line number
+- **Read-only CLI DB access** — all three commands copy the Kuzu DB to a temp directory so they can run concurrently with the MCP server without lock conflicts
+- Graceful `call_kind` fallback — trace works on indexes built before v0.1.20 (missing column)
+- Updated `AGENTS.md` version to 0.1.21
+
 ## 0.1.20 - 2026-06-17
 
 ### Added

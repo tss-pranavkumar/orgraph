@@ -10,11 +10,10 @@ import kuzu
 class OrgraphDB:
     """Manages a Kuzu database for a single indexed repo."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, read_only: bool = False) -> None:
         self.db_path = Path(db_path)
-        # Kuzu creates the db directory itself — only ensure the parent exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(str(self.db_path))
+        self._db = kuzu.Database(str(self.db_path), read_only=read_only)
         self._conn = kuzu.Connection(self._db)
 
     def execute(self, query: str, params: dict[str, Any] | None = None) -> kuzu.QueryResult:
