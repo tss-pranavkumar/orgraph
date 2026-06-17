@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2025-06-17
+
+### Fixed
+- `orgraph --version` now works correctly (package_name was `orgraph`, should be `orgraph-mcp`)
+
 ## 0.1.1 - 2025-06-17
 
 ### Fixed

@@ -16,7 +16,7 @@ def _orgraph_dir(repo_path: Path) -> Path:
 
 
 @click.group()
-@click.version_option(package_name="orgraph")
+@click.version_option(package_name="orgraph-mcp")
 def main() -> None:
     """Codebase knowledge graph for coding agents."""
 
