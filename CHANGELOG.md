@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16 - 2026-06-17
+
+### Fixed
+- `orgraph install` for Claude Code: `claude mcp add` errors if the entry already exists — now removes the existing entry first, then re-adds. Previously showed `mcp (error)` on every reinstall.
+
 ## 0.1.15 - 2026-06-17
 
 ### Changed
