@@ -64,6 +64,19 @@ def index(repo_path: str, force: bool) -> None:
     for warning in stats.get("warnings", []):
         console.print(f"  [yellow]⚠[/]  {warning}")
 
+    # Nudge: if we used tree-sitter but a SCIP indexer exists for this language,
+    # point the user at the higher-precision (compiler-resolved) call graph.
+    if stats.get("extractor") == "treesitter":
+        from orgraph.extract.scip import _binary_for_lang, _detect_primary_lang, scip_install_hint
+        lang = _detect_primary_lang(repo)
+        if lang and not _binary_for_lang(lang):
+            hint = scip_install_hint(lang)
+            if hint:
+                console.print(
+                    f"  [dim]tip: for a higher-precision call graph, install [bold]{hint[0]}[/]"
+                    f" ([italic]{hint[1]}[/]) — orgraph will use it automatically.[/]"
+                )
+
     # --- Manifest ---
     manifest.update(manifest.all_files(repo))
     manifest.save()

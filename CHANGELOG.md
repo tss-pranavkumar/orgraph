@@ -24,6 +24,11 @@
 - `tests/test_scip.py` against a committed `tests/fixtures/simple_python.scip` (no binary needed in CI);
   live end-to-end test guarded by `skipif(scip-python not installed)`.
 
+### Added
+- **CLI nudge:** when `orgraph index` falls back to tree-sitter but a SCIP indexer exists for the repo's
+  primary language (and isn't installed), it prints a one-line tip to install `scip-<lang>` for a
+  higher-precision call graph. orgraph then uses it automatically on the next index.
+
 ### Note
 - SCIP stays **opt-in** (used only when a `scip-<lang>` binary is on PATH). Default remains tree-sitter.
 

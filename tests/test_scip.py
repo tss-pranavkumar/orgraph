@@ -72,6 +72,14 @@ def test_calls_are_compiler_extracted(scip_result):
     assert local and all(e["confidence"] == "EXTRACTED" for e in local)
 
 
+def test_scip_install_hint():
+    from orgraph.extract.scip import scip_install_hint
+    binary, hint = scip_install_hint("python")
+    assert binary == "scip-python"
+    assert "npm" in hint  # scip-python is an npm package, not pip
+    assert scip_install_hint("cobol") is None
+
+
 @pytest.mark.skipif(shutil.which("scip-python") is None, reason="scip-python not installed")
 def test_scip_extractor_end_to_end(tmp_path):
     """If scip-python is on PATH, ScipExtractor.run() produces a non-empty graph."""
