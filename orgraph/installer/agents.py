@@ -31,19 +31,27 @@ CLAUDE_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
 ## orgraph — Codebase Knowledge Graph
 
-An `orgraph` MCP server is running with 5 tools:
-- `search(query, top_k)` — hybrid BM25+semantic search over code chunks
-- `trace(symbol, direction, depth)` — follow call chains forward (callees) or backward (callers)
-- `get_context(file_or_symbol)` — topology cluster + community placement, call depth, indegree
-- `find_entry_points(kind)` — HTTP handlers and entry surfaces; kind = "all" | "http" | "topology"
-- `get_dependencies(file_path, direction, depth)` — import + call dependency tree
+An `orgraph` MCP server is registered for this repo. Its tools are deferred — load them at the
+start of every session before doing any codebase exploration:
+
+```
+ToolSearch: select:mcp__orgraph__search,mcp__orgraph__trace,mcp__orgraph__get_context,mcp__orgraph__find_entry_points,mcp__orgraph__get_dependencies
+```
+
+Once loaded, prefer orgraph over grep/find/Read for any question about how the code works:
+- `mcp__orgraph__search(query)` — hybrid BM25+semantic search over code chunks
+- `mcp__orgraph__trace(symbol, direction, depth)` — follow call chains forward (callees) or backward (callers)
+- `mcp__orgraph__get_context(file_or_symbol)` — topology cluster + community placement, call depth, indegree
+- `mcp__orgraph__find_entry_points(kind)` — HTTP handlers and entry surfaces; kind = "all" | "http" | "topology"
+- `mcp__orgraph__get_dependencies(file_path, direction, depth)` — import + call dependency tree
 
 ### Workflow
-1. Start with `search` to find relevant code by description.
-2. Use `trace` to follow a function's call chain — don't read files to discover callers/callees.
-3. Use `get_context` to understand where a file/symbol fits architecturally before editing.
-4. Use `find_entry_points` to map the API surface of an unfamiliar codebase.
-5. Use `get_dependencies` to understand what a file pulls in before refactoring it.
+1. Call ToolSearch to load the tools (see above) before the first orgraph call each session.
+2. Start with `mcp__orgraph__search` to find relevant code by description.
+3. Use `mcp__orgraph__trace` to follow call chains — don't read files to discover callers/callees.
+4. Use `mcp__orgraph__get_context` to understand where a file/symbol fits architecturally before editing.
+5. Use `mcp__orgraph__find_entry_points` to map the API surface of an unfamiliar codebase.
+6. Use `mcp__orgraph__get_dependencies` to understand what a file pulls in before refactoring it.
 <!-- ORGRAPH_END -->
 """
 
