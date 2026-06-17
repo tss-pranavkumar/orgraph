@@ -323,12 +323,19 @@ def serve(repo_path: str) -> None:
     repo = Path(repo_path).resolve()
     orgraph_dir = _orgraph_dir(repo)
 
+    _err = Console(stderr=True)
+    db_path = orgraph_dir / "graph.kuzu"
+    if db_path.exists() and not db_path.is_dir():
+        # Old kuzu single-file format — delete so kuzu 0.9 can create fresh directory
+        db_path.unlink()
+        _err.print("[dim]orgraph: removed stale single-file graph.kuzu (format migration)[/dim]")
+
     if not (orgraph_dir / "graph.kuzu").exists():
-        console.print(f"[dim]orgraph: no index found for {repo.name} — indexing now…[/dim]", file=sys.stderr)
+        _err.print(f"[dim]orgraph: no index found for {repo.name} — indexing now…[/dim]")
         from click.testing import CliRunner
         result = CliRunner().invoke(index, [str(repo)])
         if result.exit_code != 0:
-            console.print(f"[red]orgraph: auto-index failed[/red]\n{result.output}", file=sys.stderr)
+            _err.print(f"[red]orgraph: auto-index failed[/red]\n{result.output}")
             raise SystemExit(1)
 
     start_server(repo)

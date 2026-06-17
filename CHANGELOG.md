@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-06-17
+
+### Fixed
+- `serve` no longer crashes with `TypeError` when auto-indexing (Console.print doesn't accept `file=`)
+- `serve` auto-migrates stale single-file `graph.kuzu` (kuzu 0.8 format) to the new directory format on startup
+
 ## 0.1.2 - 2025-06-17
 
 ### Fixed
