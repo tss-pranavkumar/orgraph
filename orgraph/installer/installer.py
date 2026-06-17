@@ -74,10 +74,16 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
     return WriteResult(path, action)
 
 
-def _apply_instructions(agent: AgentTarget, mode: Mode) -> WriteResult | None:
+def _apply_instructions(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) -> WriteResult | None:
     if agent.instructions_path is None:
         return None
-    path = agent.instructions_path
+    # For Claude Code, write to {repo_path}/.claude/CLAUDE.md so it's loaded
+    # as project-level context — the global ~/.claude/CLAUDE.md is often buried
+    # and Claude may not act on it proactively.
+    if agent.id == "claude" and repo_path:
+        path = repo_path / ".claude" / "CLAUDE.md"
+    else:
+        path = agent.instructions_path
     action = upsert_instructions(path, CLAUDE_MD_BLOCK) if mode == "install" else remove_instructions(path)
     return WriteResult(path, action)
 
@@ -121,12 +127,15 @@ def _checkbox(prompt: str, items: Sequence[tuple[str, _T, bool]]) -> list[_T] | 
     ).ask()
 
 
-def _print_plan(agents: list[AgentTarget], integrations: list[Integration]) -> None:
+def _print_plan(agents: list[AgentTarget], integrations: list[Integration], repo_path: Path | None = None) -> None:
     print(f"\n  {_BOLD}Plan:{_RESET}\n")
     for agent in agents:
         print(f"  {_BOLD}{agent.display_name}{_RESET}")
         for integ in integrations:
-            path = integ.plan_path(agent)
+            if integ.id == "instructions" and agent.id == "claude" and repo_path:
+                path = repo_path / ".claude" / "CLAUDE.md"
+            else:
+                path = integ.plan_path(agent)
             ok = path is not None
             print(f"    {integ.label:<13} {_tick(ok)}  {path if ok else '(not supported)'}")
     print()
@@ -139,6 +148,8 @@ def _apply_all(mode: Mode, agents: list[AgentTarget], integrations: list[Integra
         for integ in integrations:
             if integ.id == "mcp":
                 result = _apply_mcp(agent, mode, repo_path)
+            elif integ.id == "instructions":
+                result = _apply_instructions(agent, mode, repo_path)
             else:
                 result = integ.apply(agent, mode)
             if result is None:
@@ -180,7 +191,7 @@ def run(mode: Mode, repo_path: Path | None = None) -> None:
         integ_items,
     ) or _exit("Nothing selected. Exiting.")
 
-    _print_plan(chosen_agents, chosen_integrations)
+    _print_plan(chosen_agents, chosen_integrations, repo_path)
 
     if not questionary.confirm("Proceed?", default=install).ask():
         _exit("Cancelled.")

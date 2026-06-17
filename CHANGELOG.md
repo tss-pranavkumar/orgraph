@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 - 2026-06-17
+
+### Fixed
+- `orgraph install` for Claude Code now writes the orgraph instructions block to `{repo_path}/.claude/CLAUDE.md` (project-level) instead of `~/.claude/CLAUDE.md` (global). Claude Code loads project-level CLAUDE.md at session start with high priority — the global file is often deprioritized, causing Claude to miss the ToolSearch instruction entirely.
+
 ## 0.1.9 - 2026-06-17
 
 ### Fixed
