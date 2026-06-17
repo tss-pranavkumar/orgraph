@@ -29,12 +29,20 @@ def _bake_repo_path(entry: dict, repo_path: Path) -> dict:
     return {**entry, "args": [str(repo_path) if a == "." else a for a in args]}
 
 
-def merge_json_mcp(path: Path, key: str, entry: dict) -> Action:
-    """Add orgraph to the MCP servers block in a JSON config file."""
+def merge_json_mcp(path: Path, key: str, entry: dict, remove_project_scoped: bool = False) -> Action:
+    """Add orgraph to the MCP servers block in a JSON config file.
+
+    remove_project_scoped: if True, also removes any project-scoped orgraph entries
+    from ~/.claude.json projects[*][mcpServers] to avoid scope conflicts.
+    """
     data = _read_json(path)
+    if remove_project_scoped:
+        for proj_val in data.get("projects", {}).values():
+            proj_val.get("mcpServers", {}).pop("orgraph", None)
+            proj_val.get("mcpServers", {}).pop("orgraph-sync", None)
     servers: dict = data.setdefault(key, {})
     existing = servers.get("orgraph")
-    if existing == entry:
+    if existing == entry and not remove_project_scoped:
         return "unchanged"
     servers["orgraph"] = entry
     _write_json(path, data)

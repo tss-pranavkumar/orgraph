@@ -65,9 +65,9 @@ def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) ->
         action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
     elif agent.id == "claude":
         # Claude Code: write to global mcpServers (like semble).
-        # Tools accept `repo` per call, so no path needed at startup.
+        # Also removes any stale project-scoped entries to avoid scope conflicts.
         if mode == "install":
-            action = merge_json_mcp(path, key, entry)
+            action = merge_json_mcp(path, key, entry, remove_project_scoped=True)
         else:
             action = remove_json_mcp(path, key)
     elif mode == "install":
