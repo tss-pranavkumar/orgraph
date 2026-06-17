@@ -13,19 +13,38 @@ _HOME = Path.home()
 Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error"]
 Mode = Literal["install", "uninstall"]
 
-# Standard stdio entry (Claude Code, Cursor, Gemini CLI, Codex, Kiro…)
-_MCP_ENTRY: dict[str, object] = {
-    "command": "uvx",
-    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
-    "type": "stdio",
-}
+def _resolve_orgraph_bin() -> str:
+    """Return the orgraph binary path that is currently running.
 
-# Opencode: command is a single array, no separate args; type is "local" not "stdio"
-_OPENCODE_MCP_ENTRY: dict[str, object] = {
-    "command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve", "."],
-    "type": "local",
-    "enabled": True,
-}
+    Using sys.argv[0] means the installed MCP entry points to whatever
+    orgraph the user actually has — uvx cache, venv, system install —
+    instead of re-fetching from PyPI at server start time.
+    """
+    try:
+        p = Path(sys.argv[0]).resolve()
+        if p.exists():
+            return str(p)
+    except Exception:
+        pass
+    # Fallback: let the shell find it
+    found = shutil.which("orgraph")
+    return found or "orgraph"
+
+
+def get_mcp_entry() -> dict[str, object]:
+    """Build the stdio MCP entry using the currently-running orgraph binary."""
+    return {"command": _resolve_orgraph_bin(), "args": ["serve", "."], "type": "stdio"}
+
+
+def get_opencode_mcp_entry() -> dict[str, object]:
+    """Build the Opencode MCP entry using the currently-running orgraph binary."""
+    bin_ = _resolve_orgraph_bin()
+    return {"command": [bin_, "serve", "."], "type": "local", "enabled": True}
+
+
+# Keep module-level names for import compatibility — evaluated lazily at install time
+_MCP_ENTRY: dict[str, object] = {"command": "uvx", "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "stdio"}
+_OPENCODE_MCP_ENTRY: dict[str, object] = {"command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve", "."], "type": "local", "enabled": True}
 
 CLAUDE_MD_BLOCK = """\
 <!-- ORGRAPH_START -->
