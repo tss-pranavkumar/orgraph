@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-06-17
+
+### Fixed
+- `orgraph install` crash: `_VSCODE_MCP_ENTRY` deleted but VS Code still referenced it — now uses `_MCP_ENTRY`
+
 ## 0.1.7 - 2026-06-17
 
 ### Fixed
