@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
+.venv/
+
+# Test cache
+.pytest_cache/
+
+# orgraph runtime state (per-repo, not source)
+.orgraph/
+
+# Reference code repos (not our source)
+.codes/
+
+# Editor
+.DS_Store
+*.swp

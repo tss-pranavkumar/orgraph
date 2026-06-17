@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orgraph"
+version = "0.1.0"
+description = "Codebase knowledge graph for coding agents"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "kuzu>=0.8",
+    "semble>=0.3.4",
+    "networkx>=3.4",
+    "fastmcp>=2.0",
+    "protobuf>=3.20,<3.21",
+    "tree-sitter>=0.23,<0.26",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "rich>=13.0",
+    "orjson>=3.9",
+    "pathspec>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+orgraph = "orgraph.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orgraph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
