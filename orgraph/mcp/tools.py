@@ -1,12 +1,39 @@
 """MCP tool implementations for orgraph.
 
 All tools are registered onto a FastMCP instance via register_tools().
-Context (db, search index, topology, communities) is captured via closure.
+Context is held in a mutable State so the reindex tool can swap in fresh
+index/topology without restarting the server.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+@dataclass
+class State:
+    """Mutable server state — updated in-place by reindex."""
+    db: Any
+    idx: Any
+    topology: Any
+    communities: dict[int, list[str]] | None
+    repo_path: Path
+
+    # derived lookups — rebuilt whenever topology/communities change
+    uid_to_community: dict[str, int] = field(default_factory=dict)
+    cluster_by_id: dict[str, Any] = field(default_factory=dict)
+
+    def rebuild_lookups(self) -> None:
+        self.uid_to_community = {}
+        if self.communities:
+            for cid, nodes in self.communities.items():
+                for uid in nodes:
+                    self.uid_to_community[uid] = cid
+        self.cluster_by_id = (
+            {c.cluster_id: c for c in self.topology.clusters}
+            if self.topology else {}
+        )
 
 
 def register_tools(
@@ -17,21 +44,20 @@ def register_tools(
     communities: dict[int, list[str]] | None,
     repo_path: Path,
 ) -> dict[str, Any]:
-    """Register all 5 orgraph tools on a FastMCP instance.
+    """Register all orgraph tools on a FastMCP instance.
 
     Returns a dict of {tool_name: fn} so callers (e.g. tests) can invoke
     tools directly without going through the FastMCP async layer.
     """
+    state = State(db=db, idx=idx, topology=topology, communities=communities, repo_path=repo_path)
+    state.rebuild_lookups()
 
-    # Reverse index: node uid → community id (built once at startup)
-    uid_to_community: dict[str, int] = {}
-    if communities:
-        for cid, nodes in communities.items():
-            for uid in nodes:
-                uid_to_community[uid] = cid
+    # convenience shorthands — always read through state so reindex stays live
+    def _uid_to_community() -> dict[str, int]:
+        return state.uid_to_community
 
-    # Topology cluster lookup: file_path → cluster_id → TopologyCluster
-    cluster_by_id = {c.cluster_id: c for c in topology.clusters} if topology else {}
+    def _cluster_by_id() -> dict[str, Any]:
+        return state.cluster_by_id
 
     # ── Tool 1: search ──────────────────────────────────────────────────────
 
@@ -42,9 +68,9 @@ def register_tools(
         Returns ranked results with file location and a code snippet.
         Use this to find relevant functions, classes, or logic by description.
         """
-        if idx is None:
+        if state.idx is None:
             return [{"error": "Search index not built. Re-run `orgraph index`."}]
-        results = idx.search(query, top_k=top_k)
+        results = state.idx.search(query, top_k=top_k)
         out = []
         for r in results:
             c = r.chunk
@@ -75,26 +101,26 @@ def register_tools(
         depth = min(depth, 5)
 
         # Find root nodes matching symbol name (Function first, then Class)
-        roots = db.query_to_dicts(
+        roots = state.db.query_to_dicts(
             "MATCH (f:Function) WHERE f.name = $name "
             "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 5",
             {"name": symbol},
         )
         if not roots:
-            roots = db.query_to_dicts(
+            roots = state.db.query_to_dicts(
                 "MATCH (c:Class) WHERE c.name = $name "
                 "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 5",
                 {"name": symbol},
             )
         if not roots:
             # Try substring match across both labels
-            roots = db.query_to_dicts(
+            roots = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name CONTAINS $name "
                 "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 3",
                 {"name": symbol},
             )
         if not roots:
-            roots = db.query_to_dicts(
+            roots = state.db.query_to_dicts(
                 "MATCH (c:Class) WHERE c.name CONTAINS $name "
                 "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 3",
                 {"name": symbol},
@@ -115,14 +141,14 @@ def register_tools(
                 continue
 
             if direction == "callees":
-                edges = db.query_to_dicts(
+                edges = state.db.query_to_dicts(
                     "MATCH (f)-[r:CALLS]->(c) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
                     "c.line_number AS line, r.confidence AS confidence LIMIT 30",
                     {"uid": uid},
                 )
             else:
-                edges = db.query_to_dicts(
+                edges = state.db.query_to_dicts(
                     "MATCH (c)-[r:CALLS]->(f) WHERE f.uid = $uid "
                     "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
                     "c.line_number AS line, r.confidence AS confidence LIMIT 30",
@@ -173,18 +199,18 @@ def register_tools(
             # Try to resolve to absolute path
             candidate = Path(file_or_symbol)
             if not candidate.is_absolute():
-                candidate = repo_path / file_or_symbol
+                candidate = state.repo_path / file_or_symbol
             if candidate.exists():
                 file_path = str(candidate.resolve())
         else:
             # Symbol name — find its file from Kuzu (Function first, then Class)
-            rows = db.query_to_dicts(
+            rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.name = $name "
                 "RETURN f.path AS path, f.uid AS uid LIMIT 1",
                 {"name": file_or_symbol},
             )
             if not rows:
-                rows = db.query_to_dicts(
+                rows = state.db.query_to_dicts(
                     "MATCH (c:Class) WHERE c.name = $name "
                     "RETURN c.path AS path, c.uid AS uid LIMIT 1",
                     {"name": file_or_symbol},
@@ -192,26 +218,26 @@ def register_tools(
             if rows:
                 file_path = rows[0]["path"]
                 uid = rows[0]["uid"]
-                community_id = uid_to_community.get(uid)
+                community_id = state.uid_to_community.get(uid)
             else:
                 return {"query": file_or_symbol, "found": False}
 
-        if not topology or not file_path:
+        if not state.topology or not file_path:
             return {"query": file_or_symbol, "found": False}
 
         # Cluster lookup
-        cluster_id = topology.file_cluster_id.get(file_path)
-        cluster = cluster_by_id.get(cluster_id) if cluster_id else None
+        cluster_id = state.topology.file_cluster_id.get(file_path)
+        cluster = state.cluster_by_id.get(cluster_id) if cluster_id else None
 
         # Community lookup (for file: check all symbols in that file)
         community_id_for_file: int | None = None
         if file_path:
-            rows = db.query_to_dicts(
+            rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.path = $path RETURN f.uid AS uid LIMIT 20",
                 {"path": file_path},
             )
             for row in rows:
-                cid = uid_to_community.get(row["uid"])
+                cid = state.uid_to_community.get(row["uid"])
                 if cid is not None:
                     community_id_for_file = cid
                     break
@@ -220,13 +246,13 @@ def register_tools(
         # otherwise fall back to file-level indegree from topology.
         uid_for_indegree: str | None = locals().get("uid")  # set above if symbol path was taken
         if uid_for_indegree:
-            indegree_rows = db.query_to_dicts(
+            indegree_rows = state.db.query_to_dicts(
                 "MATCH (caller)-[:CALLS]->(target) WHERE target.uid = $uid RETURN count(*) AS n",
                 {"uid": uid_for_indegree},
             )
             indegree = indegree_rows[0]["n"] if indegree_rows else 0
         else:
-            indegree = topology.file_indegree.get(file_path, 0)
+            indegree = state.topology.file_indegree.get(file_path, 0)
 
         result: dict[str, Any] = {
             "query": file_or_symbol,
@@ -238,7 +264,7 @@ def register_tools(
             "cluster_avg_indegree": round(cluster.avg_indegree, 2) if cluster else None,
             "is_foundational": cluster.is_foundational if cluster else False,
             "community_id": community_id_for_file,
-            "call_depth": topology.file_call_depth.get(file_path),
+            "call_depth": state.topology.file_call_depth.get(file_path),
             "indegree": indegree,
         }
 
@@ -260,20 +286,20 @@ def register_tools(
         Entry points are the outermost callable surfaces of the codebase —
         HTTP handlers, CLI commands, async task workers, etc.
         """
-        if not topology:
+        if not state.topology:
             return [{"error": "No topology data. Re-run `orgraph index`."}]
 
         out: list[dict[str, Any]] = []
 
         if kind in ("all", "http"):
             # HTTP handlers from Kuzu (have http_method populated)
-            rows = db.query_to_dicts(
+            rows = state.db.query_to_dicts(
                 "MATCH (f:Function) WHERE f.http_method <> '' "
                 "RETURN f.name AS name, f.path AS path, f.line_number AS line, "
                 "f.http_method AS method, f.http_path AS route LIMIT 100",
             )
             for r in rows:
-                cluster_id = topology.file_cluster_id.get(r["path"])
+                cluster_id = state.topology.file_cluster_id.get(r["path"])
                 out.append({
                     "kind": "http",
                     "symbol": r["name"],
@@ -286,7 +312,7 @@ def register_tools(
 
         if kind in ("all", "topology"):
             # BFS entry files from topology clusters (depth 0)
-            for cluster in topology.clusters:
+            for cluster in state.topology.clusters:
                 if cluster.is_foundational:
                     continue
                 for ef in cluster.entry_files[:3]:
@@ -300,9 +326,9 @@ def register_tools(
 
         if kind == "all" and not out:
             # Fallback: indegree-0 non-foundational files
-            for f, depth in topology.file_call_depth.items():
-                if depth == 0 and topology.file_indegree.get(f, 0) == 0:
-                    cluster_id = topology.file_cluster_id.get(f)
+            for f, depth in state.topology.file_call_depth.items():
+                if depth == 0 and state.topology.file_indegree.get(f, 0) == 0:
+                    cluster_id = state.topology.file_cluster_id.get(f)
                     out.append({
                         "kind": "indegree_zero",
                         "file": f,
@@ -330,18 +356,18 @@ def register_tools(
         # Resolve to absolute path
         candidate = Path(file_path)
         if not candidate.is_absolute():
-            candidate = repo_path / file_path
+            candidate = state.repo_path / file_path
         abs_path = str(candidate.resolve()) if candidate.exists() else file_path
 
         # Check file exists in graph
-        file_rows = db.query_to_dicts(
+        file_rows = state.db.query_to_dicts(
             "MATCH (f:File {path: $path}) RETURN f.path AS path LIMIT 1",
             {"path": abs_path},
         )
         if not file_rows:
             # Try by name match
             name = Path(file_path).name
-            file_rows = db.query_to_dicts(
+            file_rows = state.db.query_to_dicts(
                 "MATCH (f:File) WHERE f.name = $name RETURN f.path AS path LIMIT 1",
                 {"name": name},
             )
@@ -359,7 +385,7 @@ def register_tools(
 
             if direction == "imports":
                 # Direct imports via IMPORTS edges (File→Module)
-                rows = db.query_to_dicts(
+                rows = state.db.query_to_dicts(
                     "MATCH (f:File {path: $path})-[r:IMPORTS]->(m:Module) "
                     "RETURN m.name AS name, m.path AS mpath, r.alias AS alias LIMIT 50",
                     {"path": cur_path},
@@ -378,7 +404,7 @@ def register_tools(
                         frontier.append((target, d + 1))
 
                 # Also: CALLS-based dependencies (functions this file calls in other files)
-                rows2 = db.query_to_dicts(
+                rows2 = state.db.query_to_dicts(
                     "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
                     "WHERE caller.path = $path AND callee.path <> $path "
                     "RETURN DISTINCT callee.path AS dep_path LIMIT 30",
@@ -398,7 +424,7 @@ def register_tools(
                         frontier.append((dep, d + 1))
 
             else:  # imported_by
-                rows = db.query_to_dicts(
+                rows = state.db.query_to_dicts(
                     "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
                     "WHERE callee.path = $path AND caller.path <> $path "
                     "RETURN DISTINCT caller.path AS dep_path LIMIT 30",
@@ -425,10 +451,114 @@ def register_tools(
             "dep_count": len(deps),
         }
 
+    # ── Tool 6: reindex ─────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def reindex(force: bool = False) -> dict[str, Any]:
+        """Re-index this repo to pick up new, modified, or deleted files.
+
+        Detects changes via file-hash manifest — only re-extracts what changed.
+        Use force=True to re-index everything regardless of changes.
+        After reindex, all other tools automatically use the updated graph.
+        """
+        import time
+        from orgraph.extract.manifest import Manifest
+        from orgraph.extract.treesitter import TreeSitterExtractor
+        from orgraph.graph.builder import GraphBuilder
+        from orgraph.graph.schema import create_schema
+        from orgraph.search.index import SearchIndex
+        from orgraph.topology.cluster import build_nx_graph_from_result, cluster
+        from orgraph.topology.context import build_repo_context
+        from orgraph.topology.serialise import (
+            load_communities, load_topology,
+            save_communities, save_topology,
+        )
+        from orgraph.topology.topology import build_topology_map
+
+        repo = state.repo_path
+        orgraph_dir = repo / ".orgraph"
+        t0 = time.perf_counter()
+
+        manifest = Manifest(orgraph_dir)
+        manifest.load()
+
+        if force:
+            changed = manifest.all_files(repo)
+            deleted: list[str] = []
+        else:
+            changed = manifest.changed_files(repo)
+            deleted = manifest.deleted_files(repo)
+
+        if not changed and not deleted:
+            return {"status": "up_to_date", "changed_files": 0, "deleted_files": 0}
+
+        builder = GraphBuilder(db=state.db, repo_path=repo)
+
+        # Delete nodes for removed files
+        deleted_nodes = 0
+        for path_str in deleted:
+            deleted_nodes += builder.delete_file_nodes(path_str)
+        manifest.remove(deleted)
+
+        # Re-extract and re-ingest changed/new files
+        nodes_added = 0
+        if changed:
+            # delete stale nodes for changed files first (functions may have been renamed)
+            for p in changed:
+                builder.delete_file_nodes(str(p))
+
+            ts = TreeSitterExtractor(repo_path=repo)
+            # Override: extract only changed files
+            import sys
+            graphify_src = ts.__class__.__module__
+            from orgraph._vendor.extract import extract as _extract
+            raw = _extract(changed, cache_root=None, parallel=True)
+            result = ts._convert(raw)
+
+            create_schema(state.db)
+            nodes_added, _ = builder.ingest(result)
+
+            # Rebuild topology + communities
+            ctx = build_repo_context(result, repo)
+            topology = build_topology_map(ctx)
+            from orgraph.extract.treesitter import TreeSitterExtractor as _TSE
+            # build full graph for Leiden (need all nodes, not just changed)
+            full_ts = _TSE(repo_path=repo)
+            full_raw = _extract(manifest.all_files(repo), cache_root=None, parallel=True)
+            full_result = full_ts._convert(full_raw)
+            G = build_nx_graph_from_result(full_result)
+            communities = cluster(G)
+
+            save_topology(topology, orgraph_dir)
+            save_communities(communities, orgraph_dir)
+
+            # Rebuild search index
+            SearchIndex.build(repo)
+            new_idx = SearchIndex.load(repo)
+
+            # Swap state in-place — all tools see fresh data immediately
+            state.idx = new_idx
+            state.topology = topology
+            state.communities = communities
+            state.rebuild_lookups()
+
+        manifest.update(changed)
+        manifest.save()
+
+        return {
+            "status": "updated",
+            "changed_files": len(changed),
+            "deleted_files": len(deleted),
+            "deleted_nodes": deleted_nodes,
+            "nodes_added": nodes_added,
+            "elapsed_s": round(time.perf_counter() - t0, 1),
+        }
+
     return {
         "search": search,
         "trace": trace,
         "get_context": get_context,
         "find_entry_points": find_entry_points,
         "get_dependencies": get_dependencies,
+        "reindex": reindex,
     }

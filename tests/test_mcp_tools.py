@@ -62,10 +62,10 @@ def full_index(tmp_path_factory):
 
 # ── all tools registered ───────────────────────────────────────────────────
 
-def test_all_five_tools_registered(full_index):
+def test_all_tools_registered(full_index):
     db, idx, topology, communities, repo_path = full_index
     tools = _get_tools(db, idx, topology, communities, repo_path)
-    assert set(tools.keys()) == {"search", "trace", "get_context", "find_entry_points", "get_dependencies"}
+    assert set(tools.keys()) == {"search", "trace", "get_context", "find_entry_points", "get_dependencies", "reindex"}
 
 
 # ── search tool ────────────────────────────────────────────────────────────
