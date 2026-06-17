@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2025-06-17
+
+### Fixed
+- Cap `requires-python < 3.14` and `kuzu < 0.10` — no pre-built wheels exist for Python 3.14 yet, causing install failure when uv picked the latest Python
+
 ## 0.1.0 - 2025-06-17
 
 ### Added
