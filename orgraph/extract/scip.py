@@ -11,14 +11,13 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from orgraph.extract.types import EdgeDict, ExtractionResult, NodeDict, make_uid
 
 # Maps extension → (language, binary, install_hint)
 _SCIP_MAP: dict[str, tuple[str, str, str]] = {
-    ".py":   ("python",     "scip-python",     "pip install scip-python"),
-    ".ipynb":("python",     "scip-python",     "pip install scip-python"),
+    ".py":   ("python",     "scip-python",     "npm install -g @sourcegraph/scip-python"),
+    ".ipynb":("python",     "scip-python",     "npm install -g @sourcegraph/scip-python"),
     ".ts":   ("typescript", "scip-typescript", "npm install -g @sourcegraph/scip-typescript"),
     ".tsx":  ("typescript", "scip-typescript", "npm install -g @sourcegraph/scip-typescript"),
     ".js":   ("javascript", "scip-typescript", "npm install -g @sourcegraph/scip-typescript"),
@@ -33,21 +32,12 @@ _SCIP_MAP: dict[str, tuple[str, str, str]] = {
     ".php":  ("php",        "scip-php",        "composer global require davidrjenni/scip-php"),
 }
 
-# SCIP SymbolKind values we care about
-_KIND_FUNCTION = {17, 26}   # Function, Method
-
 # Falcon resource method names → HTTP verbs
 _FALCON_HTTP: dict[str, str] = {
     "on_get": "GET", "on_post": "POST", "on_put": "PUT",
     "on_patch": "PATCH", "on_delete": "DELETE", "on_options": "OPTIONS",
     "on_head": "HEAD",
 }
-_KIND_CLASS    = {7}         # Class
-_KIND_INTERFACE= {20, 54}   # Interface, Protocol
-_KIND_STRUCT   = {49}
-_KIND_TRAIT    = {53}
-_KIND_ENUM     = {18}
-_KIND_VARIABLE = {15, 61}   # Variable, Property
 
 _IGNORED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"})
 
@@ -76,7 +66,7 @@ def _binary_for_lang(lang: str) -> str | None:
 def _build_command(lang: str, binary: str, repo_path: Path, out_file: Path, scratch: Path) -> list[str] | None:
     out = str(out_file)
     if binary == "scip-python":
-        return [binary, "index", "--project-root", str(repo_path), "--output", out]
+        return [binary, "index", "--cwd", str(repo_path), "--output", out, "--quiet"]
     if binary == "scip-typescript":
         return [binary, "index", "--output", out]
     if binary == "scip-go":
@@ -129,6 +119,71 @@ class ScipExtractor:
         return _parse_scip(out_file, self.repo_path)
 
 
+# ── SCIP symbol descriptor decoding ───────────────────────────────────────────
+# scip-python (and other indexers) leave SymbolInformation.kind=0 and display_name
+# empty — the name and kind live in the SCIP *symbol descriptor string*, e.g.
+#   "scip-python python . <pkg> module/ClassName#method()."
+# We decode that. Techniques adapted from CodeGraphContext's ScipIndexParser.
+
+def _name_from_symbol(symbol: str) -> str:
+    """Extract a display name from a SCIP symbol descriptor string."""
+    s = re.sub(r"\([0-9a-fA-F]{4,}\)\.?$", "", symbol)   # strip overload hash
+    s = re.sub(r"\.\(\$?[^)]*\)", "", s)                  # strip parameter descriptors
+    s = s.rstrip(".#")
+    s = re.sub(r"\(\)\.?$", "", s)                        # strip call markers ()
+    parts = re.split(r"[/#]", s)
+    name = parts[-1] if parts else symbol
+    name = re.sub(r"^`([^`]+)`$", r"\1", name)            # unwrap `escaped` names
+    if " " in name:                                       # space-separated pkg descriptors
+        name = name.rsplit(" ", 1)[-1]
+    return name
+
+
+def _label_from_symbol(symbol: str) -> str | None:
+    """Map a SCIP symbol descriptor suffix to an orgraph node label.
+
+    Returns 'Function' (functions + methods) or 'Class' (types), or None to skip
+    (namespaces, parameters, plain terms/variables) — keeping parity with the
+    tree-sitter extractor, which emits only Function and Class nodes.
+    """
+    s = symbol.rstrip()
+    if s.endswith("/"):            # namespace / module
+        return None
+    if s.endswith("()."):          # function or method
+        return "Function"
+    if s.endswith("#"):            # type: class/struct/interface/enum
+        return "Class"
+    if "#" in s and re.search(r"\([0-9a-fA-F]{4,}\)\.$", s):   # overloaded method
+        return "Function"
+    return None
+
+
+def _is_definition(occ) -> bool:
+    role = getattr(occ, "symbol_roles", getattr(occ, "role", 0))
+    return bool(role & 1)
+
+
+def _find_enclosing_symbol(ref_line: int, def_occs: list) -> str | None:
+    """Innermost definition whose enclosing_range contains ref_line (1-based)."""
+    best: str | None = None
+    best_start = -1
+    for occ in def_occs:
+        er = list(getattr(occ, "enclosing_range", []))
+        if not er:
+            continue
+        enc_start, enc_end = (er[0] + 1, er[2] + 1) if len(er) == 4 else (er[0] + 1, er[0] + 1)
+        if enc_start <= ref_line <= enc_end and enc_start > best_start:
+            best, best_start = occ.symbol, enc_start
+    return best
+
+
+def _read_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+
+
 def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     try:
         from orgraph.extract import scip_pb2  # type: ignore
@@ -141,158 +196,115 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     except Exception:
         return None
 
-    # Pass 1 — build symbol definition table
-    sym_table: dict[str, dict[str, Any]] = {}
-    for doc in index.documents:
-        for occ in doc.occurrences:
-            if occ.symbol.startswith("local "):
-                continue
-            role = getattr(occ, "symbol_roles", getattr(occ, "role", 0))
-            if role & 1:  # definition bit
-                sym_table[occ.symbol] = {
-                    "file": doc.relative_path,
-                    "line": (occ.range[0] + 1) if occ.range else 0,
-                }
+    # Reuse the tree-sitter heuristics for Falcon routes + celery dispatch so that
+    # find_entry_points works identically under SCIP (SCIP itself knows neither).
+    from orgraph.extract.treesitter import TreeSitterExtractor
+    ts = TreeSitterExtractor(repo_path=repo_path)
+    routes = ts._collect_falcon_routes()
 
+    # INHERITS relationships still come from SymbolInformation (kind/display_name
+    # are empty there, but is_implementation relationships are populated).
+    bases: dict[str, list[str]] = {}
     for doc in index.documents:
-        for sym_info in doc.symbols:
-            if sym_info.symbol in sym_table:
-                sym_table[sym_info.symbol].update({
-                    "display_name": sym_info.display_name,
-                    "documentation": "\n".join(sym_info.documentation),
-                    "kind": sym_info.kind,
-                    "bases": [r.symbol for r in sym_info.relationships if r.is_implementation],
-                })
+        for si in doc.symbols:
+            b = [r.symbol for r in si.relationships if getattr(r, "is_implementation", False)]
+            if b:
+                bases[si.symbol] = b
 
-    # Pass 2 — build nodes
     nodes: list[NodeDict] = []
-    uid_map: dict[str, str] = {}  # scip_symbol → uid
+    uid_map: dict[str, str] = {}     # scip symbol → uid
+    label_of: dict[str, str] = {}    # scip symbol → label
 
-    for sym, info in sym_table.items():
-        kind = info.get("kind", 0)
-        name = info.get("display_name", "") or sym.split(".")[-1].rstrip("()")
-        rel_path = info.get("file", "")
-        abs_path = str(repo_path / rel_path) if rel_path else ""
-        line_no = info.get("line", 0)
-
-        if kind in _KIND_FUNCTION:
-            label = "Function"
-        elif kind in _KIND_CLASS:
-            label = "Class"
-        elif kind in _KIND_INTERFACE:
-            label = "Interface"
-        elif kind in _KIND_STRUCT:
-            label = "Struct"
-        elif kind in _KIND_ENUM:
-            label = "Enum"
-        elif kind in _KIND_VARIABLE:
-            label = "Variable"
-        else:
-            continue  # skip unknown kinds
-
-        # Detect language from file extension
-        ext = Path(rel_path).suffix if rel_path else ""
-        lang_info = _SCIP_MAP.get(ext)
-        lang = lang_info[0] if lang_info else "unknown"
-
-        # For Python methods (kind=26), extract class name from SCIP symbol
-        # SCIP symbol format: "scip-python . path/to/file.py/ClassName#method_name()."
-        # Use class-qualified name to avoid collisions across different resource classes.
-        http_method = ""
-        http_path = ""
-        if kind == 26 and lang == "python":  # Method kind
-            last_segment = sym.split("/")[-1] if "/" in sym else sym
-            if "#" in last_segment:
-                class_name = last_segment.split("#")[0]
-                if class_name:
-                    name = f"{class_name}.{name}"
-                    if name.split(".")[-1] in _FALCON_HTTP:
-                        http_method = _FALCON_HTTP[name.split(".")[-1]]
-
-        uid = make_uid(name, abs_path, line_no)
-        uid_map[sym] = uid
-
-        node: NodeDict = {
-            "uid": uid,
-            "label": label,
-            "name": name,
-            "path": abs_path,
-            "line_number": line_no,
-            "end_line": line_no,
-            "lang": lang,
-            "source": "",
-            "docstring": info.get("documentation", "") or "",
-            "is_dependency": False,
-            "confidence": "EXTRACTED",
-            "http_method": http_method,
-            "http_path": http_path,
-        }
-
-        # Try to read source snippet
-        src_path = repo_path / rel_path if rel_path else None
-        if src_path and src_path.exists():
-            try:
-                lines = src_path.read_text(errors="replace").splitlines()
-                if 0 < line_no <= len(lines):
-                    node["source"] = lines[line_no - 1].strip()
-            except Exception:
-                pass
-
-        nodes.append(node)
-
-    # Pass 3 — build CALLS + INHERITS edges
-    edges: list[EdgeDict] = []
-
+    # ── Pass 1: definitions → nodes ────────────────────────────────────────────
     for doc in index.documents:
-        rel_path = doc.relative_path
-        abs_path = str(repo_path / rel_path)
-        src_lines: list[str] = []
-        try:
-            src_lines = (repo_path / rel_path).read_text(errors="replace").splitlines()
-        except Exception:
-            pass
+        abs_path = str(repo_path / doc.relative_path)
+        lang_info = _SCIP_MAP.get(Path(doc.relative_path).suffix)
+        lang = lang_info[0] if lang_info else "unknown"
+        src = _read_lines(repo_path / doc.relative_path)
 
-        # CALLS: reference occurrences where the position follows a call-like token
-        caller_sym: str | None = None
         for occ in doc.occurrences:
-            if occ.symbol.startswith("local "):
+            sym = occ.symbol
+            if sym.startswith("local ") or not _is_definition(occ):
                 continue
-            role = getattr(occ, "symbol_roles", getattr(occ, "role", 0))
-            if role & 1:
-                caller_sym = occ.symbol
-            else:
-                # Reference — check if it looks like a call (next non-space char is '(')
-                if occ.range and len(occ.range) >= 4 and src_lines:
-                    row, col_end = occ.range[0], occ.range[3] if len(occ.range) > 3 else occ.range[2]
-                    if row < len(src_lines):
-                        remainder = src_lines[row][col_end:]
-                        if remainder.lstrip().startswith("("):
-                            callee_sym = occ.symbol
-                            src_uid = uid_map.get(caller_sym) if caller_sym else None
-                            dst_uid = uid_map.get(callee_sym)
-                            if src_uid and dst_uid and src_uid != dst_uid:
-                                edges.append({
-                                    "source_uid": src_uid,
-                                    "target_uid": dst_uid,
-                                    "relation": "CALLS",
-                                    "confidence": "EXTRACTED",
-                                    "line_number": occ.range[0] + 1,
-                                })
+            label = _label_from_symbol(sym)
+            if label is None:
+                continue
+            line_no = (occ.range[0] + 1) if occ.range else 0
+            name = _name_from_symbol(sym)
 
-    # INHERITS edges from bases
-    for sym, info in sym_table.items():
+            # Qualify methods as ClassName.method (matches tree-sitter naming) and
+            # tag Falcon HTTP handlers.
+            http_method = http_path = ""
+            class_name, _, member = sym.split("/")[-1].partition("#")
+            if member and class_name:  # a member of the class, not the class itself
+                name = f"{class_name}.{name}"
+                if name.rsplit(".", 1)[-1] in _FALCON_HTTP:
+                    http_method = _FALCON_HTTP[name.rsplit(".", 1)[-1]]
+                    http_path = routes.get(class_name, "")
+
+            uid = make_uid(name, abs_path, line_no)
+            uid_map[sym] = uid
+            label_of[sym] = label
+            nodes.append({
+                "uid": uid, "label": label, "name": name, "path": abs_path,
+                "line_number": line_no, "end_line": line_no, "lang": lang,
+                "source": src[line_no - 1].strip() if 0 < line_no <= len(src) else "",
+                "docstring": "", "is_dependency": False, "confidence": "EXTRACTED",
+                "http_method": http_method, "http_path": http_path,
+            })
+
+    # ── Pass 2: references → CALLS edges (caller via enclosing_range) ───────────
+    edges: list[EdgeDict] = []
+    seen: set[tuple[str, str, int]] = set()
+    for doc in index.documents:
+        def_occs = [
+            o for o in doc.occurrences
+            if _is_definition(o) and not o.symbol.startswith("local ")
+            and list(getattr(o, "enclosing_range", []))
+        ]
+        src = _read_lines(repo_path / doc.relative_path)
+        for occ in doc.occurrences:
+            sym = occ.symbol
+            if sym.startswith("local ") or _is_definition(occ):
+                continue
+            dst_uid = uid_map.get(sym)
+            if not dst_uid or label_of.get(sym) != "Function":
+                continue  # only edges to known functions/methods are calls
+            r = list(occ.range)
+            if not r:
+                continue
+            row = r[0]
+            col_end = r[3] if len(r) >= 4 else (r[2] if len(r) >= 3 else (r[1] if len(r) > 1 else 0))
+            if row >= len(src) or not src[row][col_end:].lstrip().startswith("("):
+                continue  # reference not followed by '(' → not a call site
+            ref_line = row + 1
+            caller_sym = _find_enclosing_symbol(ref_line, def_occs)
+            src_uid = uid_map.get(caller_sym) if caller_sym else None
+            if not src_uid or src_uid == dst_uid:
+                continue
+            key = (src_uid, dst_uid, ref_line)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({
+                "source_uid": src_uid, "target_uid": dst_uid, "relation": "CALLS",
+                "confidence": "EXTRACTED", "line_number": ref_line, "call_kind": "local",
+            })
+
+    # ── Pass 3: INHERITS ───────────────────────────────────────────────────────
+    for sym, base_syms in bases.items():
         src_uid = uid_map.get(sym)
         if not src_uid:
             continue
-        for base_sym in info.get("bases", []):
-            dst_uid = uid_map.get(base_sym)
-            if dst_uid and src_uid != dst_uid:
+        for b in base_syms:
+            dst_uid = uid_map.get(b)
+            if dst_uid and dst_uid != src_uid:
                 edges.append({
-                    "source_uid": src_uid,
-                    "target_uid": dst_uid,
-                    "relation": "INHERITS",
-                    "confidence": "EXTRACTED",
-                    "line_number": 0,
+                    "source_uid": src_uid, "target_uid": dst_uid,
+                    "relation": "INHERITS", "confidence": "EXTRACTED", "line_number": 0,
                 })
+
+    # Celery dispatch parity (reuse tree-sitter heuristic over the SCIP nodes).
+    edges.extend(ts._extract_celery_dispatch_edges(nodes))
 
     return ExtractionResult(nodes=nodes, edges=edges, extractor="scip")
