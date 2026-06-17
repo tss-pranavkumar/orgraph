@@ -23,6 +23,12 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def _bake_repo_path(entry: dict, repo_path: Path) -> dict:
+    """Replace '.' placeholder in args with the absolute repo path."""
+    args = entry.get("args", [])
+    return {**entry, "args": [str(repo_path) if a == "." else a for a in args]}
+
+
 def merge_json_mcp(path: Path, key: str, entry: dict) -> Action:
     """Add orgraph to the MCP servers block in a JSON config file."""
     data = _read_json(path)
@@ -33,6 +39,51 @@ def merge_json_mcp(path: Path, key: str, entry: dict) -> Action:
     servers["orgraph"] = entry
     _write_json(path, data)
     return "updated" if existing else "created"
+
+
+def merge_claude_mcp(path: Path, repo_path: Path, entry: dict) -> Action:
+    """Write orgraph to Claude Code's project-scoped mcpServers in ~/.claude.json.
+
+    Claude Code keys MCP servers per-project under projects[abs_path][mcpServers].
+    Writing there (instead of the global mcpServers) means the server is only
+    started for that repo and gets the correct absolute path at startup.
+    Also cleans up any stale global-level entry written by older installs.
+    """
+    data = _read_json(path)
+    baked = _bake_repo_path(entry, repo_path)
+
+    # Remove stale global-level entry if present
+    data.get("mcpServers", {}).pop("orgraph", None)
+
+    project = data.setdefault("projects", {}).setdefault(str(repo_path), {})
+    servers: dict = project.setdefault("mcpServers", {})
+    existing = servers.get("orgraph")
+    if existing == baked:
+        return "unchanged"
+    servers["orgraph"] = baked
+    _write_json(path, data)
+    return "updated" if existing else "created"
+
+
+def remove_claude_mcp(path: Path, repo_path: Path) -> Action:
+    """Remove orgraph from Claude Code's project-scoped mcpServers."""
+    if not path.exists():
+        return "not-found"
+    data = _read_json(path)
+    removed = False
+    # Remove project-scoped entry
+    project = data.get("projects", {}).get(str(repo_path), {})
+    if "orgraph" in project.get("mcpServers", {}):
+        del project["mcpServers"]["orgraph"]
+        removed = True
+    # Also clean up any global-level entry
+    if "orgraph" in data.get("mcpServers", {}):
+        del data["mcpServers"]["orgraph"]
+        removed = True
+    if not removed:
+        return "not-found"
+    _write_json(path, data)
+    return "removed"
 
 
 def remove_json_mcp(path: Path, key: str) -> Action:
@@ -50,13 +101,14 @@ def remove_json_mcp(path: Path, key: str) -> Action:
 
 # ── TOML helper (Codex uses config.toml) ─────────────────────────────────────
 
-def merge_toml_mcp(path: Path) -> Action:
+def merge_toml_mcp(path: Path, repo_path: Path | None = None) -> Action:
     """Add [mcp_servers.orgraph] block to a Codex config.toml."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    serve_arg = str(repo_path) if repo_path else "."
     block = (
         '\n[mcp_servers.orgraph]\n'
         'command = "uvx"\n'
-        'args = ["--from", "orgraph-mcp", "orgraph", "serve", "."]\n'
+        f'args = ["--from", "orgraph-mcp", "orgraph", "serve", "{serve_arg}"]\n'
     )
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     if "[mcp_servers.orgraph]" in existing:
