@@ -107,7 +107,7 @@ class TreeSitterExtractor:
         if not files:
             return ExtractionResult(extractor="treesitter")
 
-        raw = extract(files, cache_root=None, parallel=True)
+        raw = extract(files, cache_root=self.repo_path, parallel=True)
         return self._convert(raw)
 
     def _convert(self, raw: dict) -> ExtractionResult:

@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.23
+## Current version: 0.1.24
 
 ## What orgraph does
 
@@ -54,7 +54,8 @@ orgraph/
   graph/
     kuzu.py               # OrgraphDB — thin Kuzu wrapper; do NOT mkdir db_path itself
     schema.py             # create_schema(db) — all node/edge tables (IF NOT EXISTS)
-    builder.py            # GraphBuilder.ingest(result) → (nodes, edges) written
+    builder.py            # GraphBuilder.ingest(result) → (nodes, edges); .clear() wipes all nodes
+    pipeline.py           # build_index(db, repo, dir) — shared full-build used by CLI + reindex
   topology/
     call_graph.py         # CallGraph, CallEdge, GraphRelation data structures
     context.py            # RepoContext shim; build_repo_context(result, repo_path)
@@ -68,6 +69,10 @@ orgraph/
   eval/
     __init__.py           # empty (P5)
 ```
+
+## Marketing
+
+- `launch-video/` — Remotion (React) project for the 44s product launch trailer (1920×1080, dark dev-tool aesthetic). VO clips in `launch-video/public/voiceover/` generated locally via macOS `say` (swappable). Render: `cd launch-video && ./node_modules/.bin/remotion render OrgraphTrailer out/orgraph-trailer.mp4`. Numbers shown (NDCG 0.903/0.818, symbol MRR 1.000, 18k nodes) are from live evals — keep them in sync with `orgraph eval`.
 
 ## State written to indexed repos
 
@@ -131,3 +136,29 @@ Build `orgraph/eval/` with:
 - `register_tools(mcp, db, idx, topology, communities, repo_path)` returns `dict[str, Callable]` — use this in tests, don't introspect FastMCP internals
 - FastMCP 3.4.2: `list_tools()` is async, `get_tool(name)` is async — bypass both by using the returned dict
 - Tool functions are defined as closures over `db`, `idx`, `topology`, `communities`, `repo_path`
+
+## reindex semantics (v0.1.24)
+
+- **`reindex` is a manifest-gated full rebuild, not a delta patch.** If the file-hash manifest
+  reports no changes → no-op (`status: up_to_date`). Otherwise it calls `graph/pipeline.build_index`,
+  which wipes the graph (`GraphBuilder.clear()`) and rebuilds graph + topology + communities from a
+  single cache-backed extraction, then re-embeds search. `orgraph index` shares the same
+  `build_index` so CLI and MCP can never diverge.
+- **Why full, not delta:** the old delta path `delete_file_nodes(changed)` did `DETACH DELETE`,
+  which dropped incoming `caller→callee` CALLS edges from *unchanged* callers; re-extracting only the
+  changed file never re-created them, so the graph eroded on every reindex. Regression test:
+  `tests/test_mcp_tools.py::test_reindex_rebuilds_and_preserves_cross_file_edges`.
+- **Extraction is AST-cached** (graphify cache keyed by file hash), so the full re-extract is cheap
+  for unchanged files. Search is always a full re-embed — **semble has no incremental API**.
+- **Tool honesty:** `trace` / `get_dependencies` / `get_context` return a `truncated` flag when a
+  result cap is hit; `find_entry_points` appends a `truncation_notice` item (kept list-shaped, with a
+  `symbol` key, so existing callers don't break). `trace` returns `alternatives` + a `note` when a
+  name is ambiguous and accepts `file=` (a path fragment) to pin a specific definition.
+
+## Known follow-up
+
+- The graphify extractor writes its AST cache to `graphify-out/` in the **indexed repo root**
+  (cache lands at `<root>/<GRAPHIFY_OUT>/cache`). It should live under `.orgraph/` instead — set the
+  `GRAPHIFY_OUT` env var (accepts an absolute path) before extraction. Deferred because a fixture
+  cache is committed under `tests/fixtures/simple_python/graphify-out/` and relocating orphans
+  existing caches across already-indexed repos.

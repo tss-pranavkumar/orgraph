@@ -100,6 +100,25 @@ class GraphBuilder:
         self.db = db
         self.repo_path = repo_path
 
+    def clear(self) -> int:
+        """Delete every node (DETACH removes all incident edges). Returns nodes deleted.
+
+        Used for full graph rebuilds — guarantees no stale nodes/edges and no
+        MERGE-duplicated edges survive across re-indexes.
+        """
+        total = 0
+        for label in (
+            "Function", "Class", "Interface", "Struct", "Enum",
+            "Variable", "Module", "File", "Directory",
+        ):
+            try:
+                rows = self.db.query_to_dicts(f"MATCH (n:{label}) RETURN count(n) AS c")
+                total += rows[0]["c"] if rows else 0
+                self.db.execute(f"MATCH (n:{label}) DETACH DELETE n")
+            except Exception:
+                pass
+        return total
+
     def delete_file_nodes(self, file_path: str) -> int:
         """Delete all symbol nodes belonging to a file. Returns count deleted."""
         count = 0
