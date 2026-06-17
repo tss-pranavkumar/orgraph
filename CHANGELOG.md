@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17 - 2026-06-17
+
+### Changed
+- CLAUDE.md block rewritten to be directive: explicitly tells Claude to use orgraph tools **instead of** grep/find/Read, with a substitution table and per-tool guidance on when to reach for each one.
+
 ## 0.1.16 - 2026-06-17
 
 ### Fixed
