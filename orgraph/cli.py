@@ -61,6 +61,9 @@ def index(repo_path: str, force: bool) -> None:
     console.print(f"  [green]✓[/] Communities: [bold]{stats['communities']}[/] (Leiden/Louvain)")
     console.print("  [green]✓[/] Search index built (.orgraph/search/)")
 
+    for warning in stats.get("warnings", []):
+        console.print(f"  [yellow]⚠[/]  {warning}")
+
     # --- Manifest ---
     manifest.update(manifest.all_files(repo))
     manifest.save()

@@ -167,6 +167,44 @@ def test_build_index_topology_matches_direct(tmp_path):
     assert stats["communities"] >= 1
 
 
+def test_build_index_warns_on_unextractable_files(tmp_path):
+    """A repo whose only code files have no extractor must surface a warning, not silent success."""
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.pipeline import build_index
+
+    target = tmp_path / "sql_only"
+    target.mkdir()
+    (target / "schema.sql").write_text("CREATE TABLE t (id INT);\n", encoding="utf-8")
+
+    orgraph_dir = target / ".orgraph"
+    orgraph_dir.mkdir(parents=True, exist_ok=True)
+    db = OrgraphDB(orgraph_dir / "graph.kuzu")
+    try:
+        stats = build_index(db, target, orgraph_dir, rebuild_search=False)
+    finally:
+        db.close()
+
+    assert stats["nodes"] == 0
+    assert stats["warnings"], "expected a warning when code files yield no symbols"
+    assert ".sql" in stats["warnings"][0]
+
+
+def test_build_index_no_warning_for_supported_repo(tmp_path):
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.pipeline import build_index
+
+    result, target = _get_result_outside_tests(tmp_path)
+    orgraph_dir = target / ".orgraph"
+    orgraph_dir.mkdir(parents=True, exist_ok=True)
+    db = OrgraphDB(orgraph_dir / "graph.kuzu")
+    try:
+        stats = build_index(db, target, orgraph_dir, rebuild_search=False, result=result)
+    finally:
+        db.close()
+
+    assert stats["warnings"] == []
+
+
 def test_communities_json_roundtrip(tmp_path):
     from orgraph.topology.cluster import build_nx_graph_from_result, cluster
     from orgraph.topology.serialise import load_communities, save_communities

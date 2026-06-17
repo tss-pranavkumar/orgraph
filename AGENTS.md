@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.24
+## Current version: 0.1.25
 
 ## What orgraph does
 
@@ -89,7 +89,7 @@ orgraph/
 - **Kuzu DB path**: Kuzu 0.9+ creates a *directory* at `db_path`. Never `mkdir(db_path)` — only `mkdir(db_path.parent)`. `serve` auto-deletes stale single-file `graph.kuzu` (old format) and re-indexes.
 - **graphify path**: `extract/treesitter.py` adds `~/tss/codegen/orgraph/.codes/graphify` to `sys.path` at runtime. If `.codes/` moves, update `_GRAPHIFY_ROOT`.
 - **graphify label field**: graphify puts display names in `label` (`"authenticate()"`, `"User"`). Not a type tag. Conversion logic lives in `treesitter.py`.
-- **tree-sitter grammars**: `tree-sitter-python`, `tree-sitter-javascript`, `tree-sitter-typescript` must be installed (in `pyproject.toml` deps).
+- **tree-sitter grammars**: the bundled extractor (`_vendor/extract.py`) dispatches ~25 languages, each importing its grammar lazily and degrading to 0 nodes if the grammar is absent. Core deps ship Python/JS/TS + Go/Rust/Java/C/C++/C#/Ruby/PHP. Other langs (Kotlin/Scala/Groovy/Lua/Swift) use incompatible release schemes — install their grammar manually to enable. `build_index` warns (CLI) / returns `warnings` (MCP) when code files on disk produce no symbols, so a missing grammar surfaces instead of a silent empty index.
 - **`_is_test_file` heuristic**: Files under paths containing `/tests/` or `/test/` are excluded from BFS entry points. Tests that run topology on fixture code must copy fixtures to a non-tests temp dir (`shutil.copytree(FIXTURE, tmp_path / "simple_python")`).
 - **Topology depends on ExtractionResult**: `build_repo_context()` builds CallGraph directly from ExtractionResult CALLS edges, not from Kuzu. Topology runs before DB is closed.
 - **Leiden falls back to Louvain**: If `graspologic` is not installed, networkx Louvain is used. Both give stable results via seed=42.
