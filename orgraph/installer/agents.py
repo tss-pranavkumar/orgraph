@@ -122,7 +122,7 @@ AGENTS: list[AgentTarget] = [
         display_name="VS Code",
         binary="code",
         config_dir=None,
-        mcp=McpConfig(_vscode_mcp_path(), "servers", _VSCODE_MCP_ENTRY),
+        mcp=McpConfig(_vscode_mcp_path(), "servers", _MCP_ENTRY),
         instructions_path=None,
     ),
     AgentTarget(
