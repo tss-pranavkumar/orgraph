@@ -316,7 +316,33 @@ def eval(repo_path: str, ground_truth: str | None, top_k: int, output: str | Non
 @main.command()
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 def serve(repo_path: str) -> None:
-    """Start the MCP server for a repo (stdio transport)."""
+    """Start the MCP server for a repo (stdio transport). Auto-indexes if needed."""
+    import sys
     from orgraph.mcp.server import start_server
+
     repo = Path(repo_path).resolve()
+    orgraph_dir = _orgraph_dir(repo)
+
+    if not (orgraph_dir / "graph.kuzu").exists():
+        console.print(f"[dim]orgraph: no index found for {repo.name} — indexing now…[/dim]", file=sys.stderr)
+        from click.testing import CliRunner
+        result = CliRunner().invoke(index, [str(repo)])
+        if result.exit_code != 0:
+            console.print(f"[red]orgraph: auto-index failed[/red]\n{result.output}", file=sys.stderr)
+            raise SystemExit(1)
+
     start_server(repo)
+
+
+@main.command()
+def install() -> None:
+    """Interactively configure orgraph MCP for installed coding agents."""
+    from orgraph.installer.installer import run
+    run("install")
+
+
+@main.command()
+def uninstall() -> None:
+    """Remove orgraph MCP configuration from coding agents."""
+    from orgraph.installer.installer import run
+    run("uninstall")

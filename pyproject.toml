@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.0",
     "orjson>=3.9",
     "pathspec>=0.12",
+    "questionary>=2.0",
 ]
 
 [project.optional-dependencies]
