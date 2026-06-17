@@ -143,54 +143,13 @@ def _no_repo_error(repo_arg: str) -> dict:
 
 
 def _resolve_indexed_file_path(state: State, file_path: str) -> str:
-    candidate = Path(file_path)
-    if not candidate.is_absolute():
-        candidate = state.repo_path / file_path
-    abs_candidate = str(candidate.resolve()) if candidate.exists() else ""
-
-    if abs_candidate:
-        rows = state.db.query_to_dicts(
-            "MATCH (f:File {path: $path}) RETURN f.path AS path LIMIT 1",
-            {"path": abs_candidate},
-        )
-        if rows:
-            return rows[0]["path"]
-
-    name = Path(file_path).name
-    rows = state.db.query_to_dicts(
-        "MATCH (f:File) WHERE f.name = $name RETURN f.path AS path LIMIT 1",
-        {"name": name},
-    )
-    if rows:
-        return rows[0]["path"]
-
-    fragment = str(file_path)
-    rows = state.db.query_to_dicts(
-        "MATCH (f:File) WHERE f.path CONTAINS $fragment RETURN f.path AS path LIMIT 1",
-        {"fragment": fragment},
-    )
-    return rows[0]["path"] if rows else abs_candidate
+    from orgraph.graph import query as gq
+    return gq.resolve_file_path(state.db, file_path, state.repo_path)
 
 
 def _symbols_for_file(state: State, file_path: str, limit: int = 200) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for label, kind in (("Function", "function"), ("Class", "class")):
-        part = state.db.query_to_dicts(
-            f"MATCH (s:{label}) WHERE s.path = $path "
-            "RETURN s.uid AS uid, s.name AS name, s.path AS path, "
-            "s.line_number AS line",
-            {"path": file_path},
-        )
-        for row in part:
-            rows.append({
-                "name": row.get("name") or "",
-                "kind": kind,
-                "path": row.get("path") or "",
-                "line": row.get("line") or 0,
-                "uid": row.get("uid") or "",
-            })
-    rows.sort(key=lambda r: (r["line"], r["kind"], r["name"]))
-    return rows[:limit]
+    from orgraph.graph import query as gq
+    return gq.get_file_symbols(state.db, file_path, limit)
 
 
 def _file_symbol_candidates(state: State, query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -337,6 +296,8 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         depth: how many hops to follow (max 5).
         Pass `repo` as the absolute path to the project.
         """
+        from orgraph.graph import query as gq
+
         state = _get_state(repo)
         if state is None:
             return _no_repo_error(repo)
@@ -344,29 +305,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             return _LOADING
         depth = min(depth, 5)
 
-        roots = state.db.query_to_dicts(
-            "MATCH (f:Function) WHERE f.name = $name "
-            "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 5",
-            {"name": symbol},
-        )
-        if not roots:
-            roots = state.db.query_to_dicts(
-                "MATCH (c:Class) WHERE c.name = $name "
-                "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 5",
-                {"name": symbol},
-            )
-        if not roots:
-            roots = state.db.query_to_dicts(
-                "MATCH (f:Function) WHERE f.name CONTAINS $name "
-                "RETURN f.uid AS uid, f.name AS name, f.path AS path, f.line_number AS line LIMIT 3",
-                {"name": symbol},
-            )
-        if not roots:
-            roots = state.db.query_to_dicts(
-                "MATCH (c:Class) WHERE c.name CONTAINS $name "
-                "RETURN c.uid AS uid, c.name AS name, c.path AS path, c.line_number AS line LIMIT 3",
-                {"name": symbol},
-            )
+        roots = gq.resolve_symbol(state.db, symbol)
         if not roots:
             candidates = _file_symbol_candidates(state, symbol, limit=20)
             if candidates:
@@ -380,49 +319,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             return {"root": symbol, "found": False, "chain": []}
 
         root = roots[0]
-        chain: list[dict] = []
-        visited: set[str] = {root["uid"]}
-        frontier: list[tuple[str, str, str, int, int]] = [
-            (root["uid"], root["name"], root["path"], root.get("line") or 0, 0)
-        ]
-
-        while frontier:
-            uid, name, path, line, d = frontier.pop(0)
-            if d >= depth:
-                continue
-
-            if direction == "callees":
-                edges = state.db.query_to_dicts(
-                    "MATCH (f)-[r:CALLS]->(c) WHERE f.uid = $uid "
-                    "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
-                    "c.line_number AS line, r.confidence AS confidence, "
-                    "r.call_kind AS call_kind LIMIT 30",
-                    {"uid": uid},
-                )
-            else:
-                edges = state.db.query_to_dicts(
-                    "MATCH (c)-[r:CALLS]->(f) WHERE f.uid = $uid "
-                    "RETURN c.uid AS uid, c.name AS name, c.path AS path, "
-                    "c.line_number AS line, r.confidence AS confidence, "
-                    "r.call_kind AS call_kind LIMIT 30",
-                    {"uid": uid},
-                )
-
-            for e in edges:
-                chain.append({
-                    "from_symbol": name,
-                    "from_file": path,
-                    "from_line": line,
-                    "to_symbol": e["name"],
-                    "to_file": e["path"],
-                    "to_line": e.get("line") or 0,
-                    "confidence": e.get("confidence") or "INFERRED",
-                    "call_kind": e.get("call_kind") or "local",
-                    "depth": d + 1,
-                })
-                if e["uid"] not in visited:
-                    visited.add(e["uid"])
-                    frontier.append((e["uid"], e["name"], e["path"], e.get("line") or 0, d + 1))
+        chain = gq.traverse_calls(state.db, root["uid"], direction, depth)
 
         return {
             "root": root["name"],
@@ -430,7 +327,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             "root_line": root.get("line") or 0,
             "direction": direction,
             "found": True,
-            "chain": chain[:100],
+            "chain": chain,
         }
 
     # ── Tool 3: get_context ─────────────────────────────────────────────────
@@ -498,12 +395,9 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                     community_id_for_file = cid
                     break
 
+        from orgraph.graph import query as gq
         if uid:
-            indegree_rows = state.db.query_to_dicts(
-                "MATCH (caller)-[:CALLS]->(target) WHERE target.uid = $uid RETURN count(*) AS n",
-                {"uid": uid},
-            )
-            indegree = indegree_rows[0]["n"] if indegree_rows else 0
+            indegree = gq.get_symbol_indegree(state.db, uid)
         else:
             indegree = state.topology.file_indegree.get(file_path, 0)
 
@@ -565,35 +459,24 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
 
         out: list[dict[str, Any]] = []
 
+        from orgraph.graph import query as gq
+
         if kind in ("all", "http"):
-            rows = state.db.query_to_dicts(
-                "MATCH (f:Function) WHERE f.http_method <> '' "
-                "RETURN f.name AS name, f.path AS path, f.line_number AS line, "
-                "f.http_method AS method, f.http_path AS route LIMIT 100",
-            )
-            for r in rows:
+            for r in gq.get_http_handlers(state.db):
                 cluster_id = state.topology.file_cluster_id.get(r["path"])
                 out.append({
                     "kind": "http",
                     "symbol": r["name"],
                     "file": r["path"],
                     "line": r.get("line") or 0,
-                    "http_method": r.get("method") or "",
-                    "http_path": r.get("route") or "",
+                    "http_method": r.get("http_method") or "",
+                    "http_path": r.get("http_path") or "",
                     "cluster": cluster_id,
                 })
 
         if kind in ("all", "tasks"):
-            rows = state.db.query_to_dicts(
-                "MATCH (caller)-[r:CALLS]->(callee) "
-                "WHERE r.call_kind = 'celery_dispatch' "
-                "RETURN caller.name AS caller, caller.path AS caller_path, "
-                "caller.line_number AS caller_line, callee.name AS task, "
-                "callee.path AS task_path, callee.line_number AS task_line, "
-                "r.line_number AS line LIMIT 100"
-            )
-            for r in rows:
-                cluster_id = state.topology.file_cluster_id.get(r["caller_path"])
+            for r in gq.get_celery_dispatches(state.db):
+                cluster_id = state.topology.file_cluster_id.get(r.get("caller_path") or "")
                 out.append({
                     "kind": "task",
                     "symbol": r.get("task") or "",
@@ -646,103 +529,22 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         depth: how many levels to traverse (max 3).
         Pass `repo` as the absolute path to the project.
         """
+        from orgraph.graph import query as gq
+
         state = _get_state(repo)
         if state is None:
             return _no_repo_error(repo)
         if state.db is None:
             return _LOADING
-        depth = min(depth, 3)
 
-        candidate = Path(file_path)
-        if not candidate.is_absolute():
-            candidate = state.repo_path / file_path
-        abs_path = str(candidate.resolve()) if candidate.exists() else file_path
-
-        file_rows = state.db.query_to_dicts(
-            "MATCH (f:File {path: $path}) RETURN f.path AS path LIMIT 1",
-            {"path": abs_path},
-        )
-        if not file_rows:
-            name = Path(file_path).name
-            file_rows = state.db.query_to_dicts(
-                "MATCH (f:File) WHERE f.name = $name RETURN f.path AS path LIMIT 1",
-                {"name": name},
-            )
-            if file_rows:
-                abs_path = file_rows[0]["path"]
-
-        deps: list[dict[str, Any]] = []
-        visited: set[str] = {abs_path}
-        frontier: list[tuple[str, int]] = [(abs_path, 0)]
-
-        while frontier:
-            cur_path, d = frontier.pop(0)
-            if d >= depth:
-                continue
-
-            if direction == "imports":
-                rows = state.db.query_to_dicts(
-                    "MATCH (f:File {path: $path})-[r:IMPORTS]->(m:Module) "
-                    "RETURN m.name AS name, m.path AS mpath, r.alias AS alias LIMIT 50",
-                    {"path": cur_path},
-                )
-                for r in rows:
-                    target = r.get("mpath") or r.get("name") or ""
-                    deps.append({
-                        "from_file": cur_path,
-                        "name": r.get("name") or "",
-                        "path": target,
-                        "alias": r.get("alias") or "",
-                        "transitive": d > 0,
-                    })
-                    if target and target not in visited:
-                        visited.add(target)
-                        frontier.append((target, d + 1))
-
-                rows2 = state.db.query_to_dicts(
-                    "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
-                    "WHERE caller.path = $path AND callee.path <> $path "
-                    "RETURN DISTINCT callee.path AS dep_path LIMIT 30",
-                    {"path": cur_path},
-                )
-                for r in rows2:
-                    dep = r.get("dep_path") or ""
-                    if dep and dep not in visited:
-                        visited.add(dep)
-                        deps.append({
-                            "from_file": cur_path,
-                            "name": Path(dep).name if dep else "",
-                            "path": dep,
-                            "alias": "",
-                            "transitive": d > 0,
-                        })
-                        frontier.append((dep, d + 1))
-
-            else:
-                rows = state.db.query_to_dicts(
-                    "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
-                    "WHERE callee.path = $path AND caller.path <> $path "
-                    "RETURN DISTINCT caller.path AS dep_path LIMIT 30",
-                    {"path": cur_path},
-                )
-                for r in rows:
-                    dep = r.get("dep_path") or ""
-                    if dep and dep not in visited:
-                        visited.add(dep)
-                        deps.append({
-                            "from_file": dep,
-                            "name": Path(dep).name if dep else "",
-                            "path": cur_path,
-                            "alias": "",
-                            "transitive": d > 0,
-                        })
-                        frontier.append((dep, d + 1))
+        abs_path = gq.resolve_file_path(state.db, file_path, state.repo_path)
+        deps = gq.get_dependencies(state.db, abs_path, direction, depth)
 
         return {
             "file": abs_path,
             "direction": direction,
-            "depth": depth,
-            "deps": deps[:100],
+            "depth": min(depth, 3),
+            "deps": deps,
             "dep_count": len(deps),
         }
 
