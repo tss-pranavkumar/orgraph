@@ -12,6 +12,11 @@ requires-python = ">=3.11"
 authors = [
     { name = "Pranav Kumar", email = "pranav.kumar@thesouledstore.com" }
 ]
+
+[project.urls]
+Homepage = "https://github.com/pranavkumar/orgraph-mcp"
+Repository = "https://github.com/pranavkumar/orgraph-mcp"
+"Bug Tracker" = "https://github.com/pranavkumar/orgraph-mcp/issues"
 keywords = ["mcp", "codebase", "knowledge-graph", "code-search", "agents", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
