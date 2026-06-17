@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.12 - 2026-06-17
+
+### Changed
+- **Global MCP mode** — orgraph now works like semble: one global MCP server shared across all projects, no per-project install. All tools accept a `repo` parameter (absolute path to the project). Install once with `orgraph install` and use it everywhere.
+- `orgraph serve` now accepts an optional repo path (still works project-specific if provided). With no path, server starts globally and loads repos lazily per tool call with a per-repo state cache.
+- `orgraph install` writes to global `mcpServers` in `~/.claude.json` (or equivalent) — no more project-scoped entries, no more per-repo `orgraph install` runs.
+- CLAUDE.md block updated to instruct passing `repo` with each tool call.
+
 ## 0.1.11 - 2026-06-17
 
 ### Fixed
