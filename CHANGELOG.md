@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14 - 2026-06-17
+
+### Fixed
+- `orgraph serve` with no arguments now starts in true global mode (passes `None` to `start_server`) instead of resolving `"."` to cwd and potentially serving the wrong directory. Tools return a clear error if `repo` is not passed per call.
+
 ## 0.1.13 - 2026-06-17
 
 ### Fixed

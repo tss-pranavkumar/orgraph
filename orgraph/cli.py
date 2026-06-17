@@ -314,12 +314,16 @@ def eval(repo_path: str, ground_truth: str | None, top_k: int, output: str | Non
 
 
 @main.command()
-@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
-def serve(repo_path: str) -> None:
-    """Start the MCP server for a repo (stdio transport). Auto-indexes in background."""
+@click.argument("repo_path", default=None, required=False, type=click.Path(exists=False, file_okay=False))
+def serve(repo_path: str | None) -> None:
+    """Start the MCP server (stdio transport).
+
+    REPO_PATH: path to the repo to serve. If omitted, starts in global mode —
+    callers pass `repo` as an argument to each tool call.
+    """
     from orgraph.mcp.server import start_server
 
-    repo = Path(repo_path).resolve()
+    repo = Path(repo_path).resolve() if repo_path else None
     start_server(repo)
 
 
