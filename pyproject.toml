@@ -12,11 +12,6 @@ requires-python = ">=3.11"
 authors = [
     { name = "Pranav Kumar", email = "pranav.kumar@thesouledstore.com" }
 ]
-
-[project.urls]
-Homepage = "https://github.com/tss-pranavkumar/orgraph"
-Repository = "https://github.com/tss-pranavkumar/orgraph"
-"Bug Tracker" = "https://github.com/tss-pranavkumar/orgraph/issues"
 keywords = ["mcp", "codebase", "knowledge-graph", "code-search", "agents", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,6 +39,11 @@ dependencies = [
     "pathspec>=0.12",
     "questionary>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/tss-pranavkumar/orgraph"
+Repository = "https://github.com/tss-pranavkumar/orgraph"
+"Bug Tracker" = "https://github.com/tss-pranavkumar/orgraph/issues"
 
 [project.optional-dependencies]
 dev = [
