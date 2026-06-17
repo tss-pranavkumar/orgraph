@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.26 - 2026-06-17
+
+### Fixed
+- **SCIP extraction actually works now.** It had never produced a usable index — three bugs, all fixed:
+  the install hint was wrong (scip-python is an **npm** package, not pip); `_build_command` passed a
+  stale `--project-root` flag (scip-python wants `--cwd`); and `_parse_scip` classified symbols off
+  `SymbolInformation.kind`/`display_name`, which scip-python leaves empty, so it yielded 0 nodes.
+- **Rewrote `_parse_scip`** (techniques adapted from CodeGraphContext): decode the SCIP **symbol
+  descriptor string** for name + kind (`_name_from_symbol`, `_label_from_symbol`), and reconstruct the
+  call graph from reference occurrences via `Occurrence.enclosing_range` (`_find_enclosing_symbol`) plus
+  a read-from-disk "next token is `(`" check (scip-python documents carry no embedded text). Methods are
+  class-qualified (`Class.method`) to match tree-sitter naming; Falcon routes + celery dispatch are
+  reused from the tree-sitter extractor so `find_entry_points` works identically under SCIP.
+
+### Measured (TSS backend, scip-python vs tree-sitter)
+- SCIP CALLS edges are ~93% compiler-EXTRACTED vs tree-sitter's ~42% (rest are heuristic guesses).
+- Repo-wide call-pair diff: 2,389 agree; 3,558 tree-sitter-only (mostly class-name-collision false
+  positives like `→ User`/`→ UserEAV`); 285 SCIP-only real calls tree-sitter missed (super()/`__init__`
+  chains, cross-class method dispatch, resolved cross-module functions).
+
+### Tests
+- `tests/test_scip.py` against a committed `tests/fixtures/simple_python.scip` (no binary needed in CI);
+  live end-to-end test guarded by `skipif(scip-python not installed)`.
+
+### Note
+- SCIP stays **opt-in** (used only when a `scip-<lang>` binary is on PATH). Default remains tree-sitter.
+
 ## 0.1.25 - 2026-06-17
 
 ### Fixed

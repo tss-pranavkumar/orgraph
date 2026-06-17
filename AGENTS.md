@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.25
+## Current version: 0.1.26
 
 ## What orgraph does
 
@@ -92,6 +92,7 @@ orgraph/
 - **tree-sitter grammars**: the bundled extractor (`_vendor/extract.py`) dispatches ~25 languages, each importing its grammar lazily and degrading to 0 nodes if the grammar is absent. Core deps ship Python/JS/TS + Go/Rust/Java/C/C++/C#/Ruby/PHP. Other langs (Kotlin/Scala/Groovy/Lua/Swift) use incompatible release schemes — install their grammar manually to enable. `build_index` warns (CLI) / returns `warnings` (MCP) when code files on disk produce no symbols, so a missing grammar surfaces instead of a silent empty index.
 - **`_is_test_file` heuristic**: Files under paths containing `/tests/` or `/test/` are excluded from BFS entry points. Tests that run topology on fixture code must copy fixtures to a non-tests temp dir (`shutil.copytree(FIXTURE, tmp_path / "simple_python")`).
 - **Topology depends on ExtractionResult**: `build_repo_context()` builds CallGraph directly from ExtractionResult CALLS edges, not from Kuzu. Topology runs before DB is closed.
+- **SCIP extraction (`extract/scip.py`)**: `extract_repo` prefers SCIP when a `scip-<lang>` binary is on PATH, else tree-sitter. scip-python is an **npm** package (`@sourcegraph/scip-python`), invoked as `scip-python index --cwd <repo> --output <f> --quiet`. It leaves `SymbolInformation.kind=0` / `display_name` empty — so `_parse_scip` decodes the SCIP **symbol descriptor string** (`_name_from_symbol`, `_label_from_symbol`) and reconstructs CALLS from reference occurrences using `Occurrence.enclosing_range` (`_find_enclosing_symbol`) + a read-from-disk `(`-after-token check (docs carry no embedded `.text`). Falcon routes + celery dispatch are reused from the tree-sitter extractor for parity. Measured on the TSS backend: SCIP CALLS are ~93% compiler-EXTRACTED vs tree-sitter's ~42%, dropping name-collision false positives and catching super()/cross-class calls tree-sitter misses. Test fixture: `tests/fixtures/simple_python.scip` (committed; CI needs no binary).
 - **Leiden falls back to Louvain**: If `graspologic` is not installed, networkx Louvain is used. Both give stable results via seed=42.
 
 ## CLI commands
