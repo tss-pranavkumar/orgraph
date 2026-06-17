@@ -5,14 +5,10 @@ to orgraph's unified NodeDict/EdgeDict schema.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from orgraph.extract.manifest import _CODE_EXTENSIONS, _IGNORED_DIRS
 from orgraph.extract.types import EdgeDict, ExtractionResult, NodeDict, make_uid
-
-# graphify lives in the reference codes; add it to sys.path for import
-_GRAPHIFY_ROOT = Path.home() / "tss/codegen/orgraph/.codes/graphify"
 
 _RELATION_MAP = {
     "calls":       "CALLS",
@@ -82,14 +78,7 @@ class TreeSitterExtractor:
         self.repo_path = repo_path
 
     def run(self) -> ExtractionResult:
-        # Ensure graphify is importable
-        graphify_src = _GRAPHIFY_ROOT / "graphify"
-        if not graphify_src.exists():
-            raise RuntimeError(f"graphify not found at {_GRAPHIFY_ROOT}")
-        if str(_GRAPHIFY_ROOT) not in sys.path:
-            sys.path.insert(0, str(_GRAPHIFY_ROOT))
-
-        from graphify.extract import extract  # type: ignore
+        from orgraph._vendor.extract import extract
 
         files = _walk_code_files(self.repo_path)
         if not files:
