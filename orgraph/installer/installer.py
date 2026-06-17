@@ -17,8 +17,11 @@ from orgraph.installer.agents import (
     is_detected,
 )
 from orgraph.installer.config import (
+    _bake_repo_path,
+    merge_claude_mcp,
     merge_json_mcp,
     merge_toml_mcp,
+    remove_claude_mcp,
     remove_instructions,
     remove_json_mcp,
     remove_toml_mcp,
@@ -48,14 +51,24 @@ class Integration:
     plan_path: Callable[[AgentTarget], Path | None]
 
 
-def _apply_mcp(agent: AgentTarget, mode: Mode) -> WriteResult | None:
+def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) -> WriteResult | None:
     if agent.mcp is None:
         return None
     path, key, entry = agent.mcp.path, agent.mcp.key, agent.mcp.entry
+
     if key == "mcp_servers":  # TOML (Codex)
-        action = merge_toml_mcp(path) if mode == "install" else remove_toml_mcp(path)
+        action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
+    elif agent.id == "claude":
+        # Claude Code uses project-scoped mcpServers keyed by abs repo path.
+        # Writing globally with "serve ." would resolve to the wrong directory at startup.
+        if mode == "install" and repo_path:
+            action = merge_claude_mcp(path, repo_path, entry)
+        else:
+            action = remove_claude_mcp(path, repo_path or Path(".").resolve())
     elif mode == "install":
-        action = merge_json_mcp(path, key, entry)
+        # Bake abs repo path into args for all other agents too (replaces "." placeholder)
+        baked = _bake_repo_path(entry, repo_path) if repo_path else entry
+        action = merge_json_mcp(path, key, baked)
     else:
         action = remove_json_mcp(path, key)
     return WriteResult(path, action)
@@ -74,7 +87,7 @@ _INTEGRATIONS: list[Integration] = [
         "mcp",
         "MCP server",
         "lets the agent call orgraph tools directly",
-        _apply_mcp,
+        _apply_mcp,  # type: ignore[arg-type]  # repo_path injected at call site
         lambda a: a.mcp.path if a.mcp else None,
     ),
     Integration(
@@ -119,12 +132,15 @@ def _print_plan(agents: list[AgentTarget], integrations: list[Integration]) -> N
     print()
 
 
-def _apply_all(mode: Mode, agents: list[AgentTarget], integrations: list[Integration]) -> None:
+def _apply_all(mode: Mode, agents: list[AgentTarget], integrations: list[Integration], repo_path: Path | None = None) -> None:
     print()
     for agent in agents:
         print(f"  {_BOLD}{agent.display_name}{_RESET}")
         for integ in integrations:
-            result = integ.apply(agent, mode)
+            if integ.id == "mcp":
+                result = _apply_mcp(agent, mode, repo_path)
+            else:
+                result = integ.apply(agent, mode)
             if result is None:
                 print(f"    {_DIM}– {integ.id}: not supported{_RESET}")
                 continue
@@ -133,7 +149,7 @@ def _apply_all(mode: Mode, agents: list[AgentTarget], integrations: list[Integra
         print()
 
 
-def run(mode: Mode) -> None:
+def run(mode: Mode, repo_path: Path | None = None) -> None:
     """Interactively install or uninstall orgraph across coding agents."""
     install = mode == "install"
     print(f"\n  {_BOLD}{'orgraph Installer' if install else 'orgraph Uninstaller'}{_RESET}\n")
@@ -169,13 +185,15 @@ def run(mode: Mode) -> None:
     if not questionary.confirm("Proceed?", default=install).ask():
         _exit("Cancelled.")
 
-    _apply_all(mode, chosen_agents, chosen_integrations)
+    _apply_all(mode, chosen_agents, chosen_integrations, repo_path)
 
     if install:
+        repo_display = str(repo_path) if repo_path else "."
         print(
             f"  {_GREEN}Done!{_RESET}  Restart your agents to pick up the changes.\n\n"
-            "  First run in any repo:\n"
-            "    orgraph index .        # one-time index (or skip — serve auto-indexes)\n"
+            f"  Registered for repo: {repo_display}\n\n"
+            "  First run:\n"
+            f"    orgraph index {repo_display}    # one-time index (or skip — serve auto-indexes)\n"
         )
     else:
         print(f"  {_GREEN}Done!{_RESET}  orgraph configuration removed.\n")

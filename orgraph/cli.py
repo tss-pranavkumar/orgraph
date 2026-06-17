@@ -324,14 +324,21 @@ def serve(repo_path: str) -> None:
 
 
 @main.command()
-def install() -> None:
-    """Interactively configure orgraph MCP for installed coding agents."""
+@click.argument("repo_path", default=".", type=click.Path(file_okay=False))
+def install(repo_path: str) -> None:
+    """Interactively configure orgraph MCP for installed coding agents.
+
+    REPO_PATH is the repo to register (default: current directory).
+    An absolute path is baked into the MCP entry so agents always serve
+    the right repo regardless of their working directory.
+    """
     from orgraph.installer.installer import run
-    run("install")
+    run("install", Path(repo_path).resolve())
 
 
 @main.command()
-def uninstall() -> None:
+@click.argument("repo_path", default=".", type=click.Path(file_okay=False))
+def uninstall(repo_path: str) -> None:
     """Remove orgraph MCP configuration from coding agents."""
     from orgraph.installer.installer import run
-    run("uninstall")
+    run("uninstall", Path(repo_path).resolve())
