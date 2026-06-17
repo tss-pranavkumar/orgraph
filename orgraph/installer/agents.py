@@ -13,17 +13,18 @@ _HOME = Path.home()
 Action = Literal["created", "updated", "unchanged", "not-found", "removed", "error"]
 Mode = Literal["install", "uninstall"]
 
-# orgraph serve uses "." so MCP client cwd (workspace root) is the repo
+# Standard stdio entry (Claude Code, Cursor, Gemini CLI, Codex, Kiro…)
 _MCP_ENTRY: dict[str, object] = {
     "command": "uvx",
     "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
+    "type": "stdio",
 }
 
-# VS Code uses "servers" key and slightly different shape
-_VSCODE_MCP_ENTRY: dict[str, object] = {
-    "command": "uvx",
-    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
-    "type": "stdio",
+# Opencode: command is a single array, no separate args; type is "local" not "stdio"
+_OPENCODE_MCP_ENTRY: dict[str, object] = {
+    "command": ["uvx", "--from", "orgraph-mcp", "orgraph", "serve", "."],
+    "type": "local",
+    "enabled": True,
 }
 
 CLAUDE_MD_BLOCK = """\
@@ -77,6 +78,14 @@ class AgentTarget:
     instructions_path: Path | None  # None = not supported
 
 
+def _opencode_mcp_path() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) / "opencode" if xdg else _HOME / ".config" / "opencode"
+    jsonc = base / "opencode.jsonc"
+    json_ = base / "opencode.json"
+    return jsonc if jsonc.exists() else (json_ if json_.exists() else jsonc)
+
+
 def is_detected(agent: AgentTarget) -> bool:
     if agent.binary and shutil.which(agent.binary):
         return True
@@ -89,7 +98,7 @@ AGENTS: list[AgentTarget] = [
         display_name="Claude Code",
         binary="claude",
         config_dir=_HOME / ".claude",
-        mcp=McpConfig(_HOME / ".claude" / "settings.json", "mcpServers", _MCP_ENTRY),
+        mcp=McpConfig(_HOME / ".claude.json", "mcpServers", _MCP_ENTRY),
         instructions_path=_HOME / ".claude" / "CLAUDE.md",
     ),
     AgentTarget(
@@ -129,11 +138,7 @@ AGENTS: list[AgentTarget] = [
         display_name="Opencode",
         binary="opencode",
         config_dir=_HOME / ".config" / "opencode",
-        mcp=McpConfig(
-            _HOME / ".config" / "opencode" / "opencode.json",
-            "mcp",
-            {**_MCP_ENTRY, "type": "local", "enabled": True},
-        ),
+        mcp=McpConfig(_opencode_mcp_path(), "mcp", _OPENCODE_MCP_ENTRY),
         instructions_path=_HOME / ".config" / "opencode" / "AGENTS.md",
     ),
 ]

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7 - 2026-06-17
+
+### Fixed
+- Claude Code: was writing to `~/.claude/settings.json` (which Claude Code ignores for MCP) — now correctly writes to `~/.claude.json` per docs and semble reference
+- Opencode: command must be an array `["uvx", ...]` not `"uvx"` string + separate `args` — Opencode's schema rejects the split format
+- Add `_opencode_mcp_path()` that checks `.jsonc` before `.json` (matches opencode's config search order)
+
 ## 0.1.6 - 2026-06-17
 
 ### Fixed

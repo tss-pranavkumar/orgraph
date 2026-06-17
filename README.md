@@ -50,13 +50,14 @@ orgraph serve /path/to/repo
 
 If you prefer to configure manually instead of using `orgraph install`:
 
-**Claude Code** (`~/.claude/settings.json`):
+**Claude Code** (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
     "orgraph": {
       "command": "uvx",
-      "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."]
+      "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
+      "type": "stdio"
     }
   }
 }
