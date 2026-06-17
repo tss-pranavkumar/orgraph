@@ -1,0 +1,156 @@
+[
+  {
+    "id": "call_graph_build",
+    "query": "where is the call graph built and how are call edges extracted",
+    "relevant_files": ["deepdoc/call_graph.py"],
+    "relevant_symbols": ["build_call_graph", "CallGraph", "CallEdge"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "topology_clustering",
+    "query": "BFS topology clustering entry points Jaccard merge",
+    "relevant_files": ["deepdoc/planner/topology.py"],
+    "relevant_symbols": ["build_topology_map", "TopologyCluster", "TopologyMap"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "bucket_planning",
+    "query": "how are documentation buckets planned and proposed from topology clusters",
+    "relevant_files": ["deepdoc/planner/heuristics.py", "deepdoc/planner/engine.py"],
+    "relevant_symbols": ["_llm_step", "_merge_plan"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "page_generation_retry",
+    "query": "LLM page generation retry logic failure prefix prompt",
+    "relevant_files": ["deepdoc/generator/generation.py"],
+    "relevant_symbols": ["_call_with_retry"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "evidence_pack",
+    "query": "evidence pack assembly for page generation owned symbols",
+    "relevant_files": ["deepdoc/generator/evidence.py"],
+    "relevant_symbols": ["_build_evidence_pack"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "site_builder_mkdocs",
+    "query": "MkDocs Material site builder YAML nav brand CSS scaffold",
+    "relevant_files": ["deepdoc/site/builder/mkdocs_builder.py"],
+    "relevant_symbols": ["build_mkdocs_from_plan"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "chatbot_retrieval",
+    "query": "chatbot hybrid retrieval FAISS SQLite FTS symbol chunks",
+    "relevant_files": ["deepdoc/chatbot/retrieval_mixin.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "llm_retry_classifier",
+    "query": "LLM error classification retryable transient fatal HTTP 500",
+    "relevant_files": ["deepdoc/llm/retry.py"],
+    "relevant_symbols": ["is_retryable_llm_error"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "smart_update",
+    "query": "incremental update changed files git diff smart update",
+    "relevant_files": ["deepdoc/smart_update_v2.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "pipeline_phases",
+    "query": "five phase pipeline scan plan generate build site orchestration",
+    "relevant_files": ["deepdoc/pipeline_v2.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "bucket_refinement",
+    "query": "bucket decomposition consolidation ownership refinement",
+    "relevant_files": ["deepdoc/planner/bucket_refinement.py"],
+    "relevant_symbols": ["_decompose_buckets"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "openapi_swagger",
+    "query": "OpenAPI spec swagger UI page generation rewriter",
+    "relevant_files": ["deepdoc/openapi.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "changelog_writer",
+    "query": "changelog writer append whats changed markdown details blocks",
+    "relevant_files": ["deepdoc/changelog_writer.py"],
+    "relevant_symbols": ["record_and_write"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "nav_shaping",
+    "query": "nav section shaping ordering normalise nav structure",
+    "relevant_files": ["deepdoc/planner/nav_shaping.py"],
+    "relevant_symbols": ["_shape_plan_nav", "_normalize_nav_section"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "consistency_pass",
+    "query": "cross-bucket consistency pass see also callout injection",
+    "relevant_files": ["deepdoc/generator/consistency.py"],
+    "relevant_symbols": ["CrossBucketConsistencyPass"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "markdown_repair",
+    "query": "markdown fence repair internal doc link rewrite post processors",
+    "relevant_files": ["deepdoc/generator/post_processors.py"],
+    "relevant_symbols": ["repair_internal_doc_links"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "cli_commands",
+    "query": "CLI commands generate update status clean serve deploy config",
+    "relevant_files": ["deepdoc/cli.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "deep_research",
+    "query": "deep research ReAct loop tools search read_file grep agentic",
+    "relevant_files": ["deepdoc/chatbot/deep_research.py"],
+    "relevant_symbols": ["DeepResearcher"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "manifest_tracking",
+    "query": "manifest file hash tracking freshness stale detection",
+    "relevant_files": ["deepdoc/manifest.py"],
+    "relevant_symbols": ["Manifest"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "persistence_state",
+    "query": "persistence state plan ledger sync baseline storage",
+    "relevant_files": ["deepdoc/persistence_v2.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "flow_candidates",
+    "query": "flow candidate entry point execution path tracing",
+    "relevant_files": ["deepdoc/planner/flow_candidates.py"],
+    "relevant_symbols": ["FlowCandidate", "EntryPoint"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "chatbot_answer_mixin",
+    "query": "chatbot answer generation citation deduplication LLM response",
+    "relevant_files": ["deepdoc/chatbot/answer_mixin.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  }
+]
