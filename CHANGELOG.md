@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11 - 2026-06-17
+
+### Fixed
+- `orgraph install` now writes the MCP entry using the **currently-running orgraph binary** (`sys.argv[0]`) instead of `uvx --from orgraph-mcp`. Previously, every install wrote a command that re-fetched from PyPI at server startup — if the PyPI version was outdated or unpublished, the server silently failed. Now the entry points to whatever binary the user actually ran (`orgraph install` with), so installs work regardless of whether the package is published.
+
 ## 0.1.10 - 2026-06-17
 
 ### Fixed

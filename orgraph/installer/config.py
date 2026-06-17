@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orgraph.installer.agents import Action, ORGRAPH_END, ORGRAPH_START
+from orgraph.installer.agents import Action, ORGRAPH_END, ORGRAPH_START, _resolve_orgraph_bin
 
 
 # ── JSON helpers ─────────────────────────────────────────────────────────────
@@ -105,10 +105,11 @@ def merge_toml_mcp(path: Path, repo_path: Path | None = None) -> Action:
     """Add [mcp_servers.orgraph] block to a Codex config.toml."""
     path.parent.mkdir(parents=True, exist_ok=True)
     serve_arg = str(repo_path) if repo_path else "."
+    orgraph_bin = _resolve_orgraph_bin()
     block = (
         '\n[mcp_servers.orgraph]\n'
-        'command = "uvx"\n'
-        f'args = ["--from", "orgraph-mcp", "orgraph", "serve", "{serve_arg}"]\n'
+        f'command = "{orgraph_bin}"\n'
+        f'args = ["serve", "{serve_arg}"]\n'
     )
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     if "[mcp_servers.orgraph]" in existing:

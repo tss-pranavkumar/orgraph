@@ -14,6 +14,8 @@ from orgraph.installer.agents import (
     Action,
     AgentTarget,
     Mode,
+    get_mcp_entry,
+    get_opencode_mcp_entry,
     is_detected,
 )
 from orgraph.installer.config import (
@@ -54,7 +56,10 @@ class Integration:
 def _apply_mcp(agent: AgentTarget, mode: Mode, repo_path: Path | None = None) -> WriteResult | None:
     if agent.mcp is None:
         return None
-    path, key, entry = agent.mcp.path, agent.mcp.key, agent.mcp.entry
+    path, key = agent.mcp.path, agent.mcp.key
+
+    # Use the currently-running orgraph binary so we don't re-fetch from PyPI
+    entry = get_opencode_mcp_entry() if agent.id == "opencode" else get_mcp_entry()
 
     if key == "mcp_servers":  # TOML (Codex)
         action = merge_toml_mcp(path, repo_path) if mode == "install" else remove_toml_mcp(path)
