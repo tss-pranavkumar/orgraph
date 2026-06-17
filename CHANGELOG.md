@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 - 2026-06-17
+
+### Fixed
+- `orgraph install` for Claude Code now writes to `~/.claude/settings.json` (where Claude Code actually reads MCP config) instead of `~/.claude.json` (which it ignores for MCP)
+- Removed `"type": "stdio"` from Claude Code MCP entry — Claude Code doesn't use it and it caused confusion
+
 ## 0.1.3 - 2026-06-17
 
 ### Fixed

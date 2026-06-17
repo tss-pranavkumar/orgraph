@@ -16,14 +16,13 @@ Mode = Literal["install", "uninstall"]
 # orgraph serve uses "." so MCP client cwd (workspace root) is the repo
 _MCP_ENTRY: dict[str, object] = {
     "command": "uvx",
-    "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."],
-    "type": "stdio",
+    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
 }
 
 # VS Code uses "servers" key and slightly different shape
 _VSCODE_MCP_ENTRY: dict[str, object] = {
     "command": "uvx",
-    "args": ["--python", "3.13", "--from", "orgraph-mcp", "orgraph", "serve", "."],
+    "args": ["--from", "orgraph-mcp", "orgraph", "serve", "."],
     "type": "stdio",
 }
 
@@ -90,7 +89,7 @@ AGENTS: list[AgentTarget] = [
         display_name="Claude Code",
         binary="claude",
         config_dir=_HOME / ".claude",
-        mcp=McpConfig(_HOME / ".claude.json", "mcpServers", _MCP_ENTRY),
+        mcp=McpConfig(_HOME / ".claude" / "settings.json", "mcpServers", _MCP_ENTRY),
         instructions_path=_HOME / ".claude" / "CLAUDE.md",
     ),
     AgentTarget(
