@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 - 2026-06-17
+
+### Changed
+- `orgraph install` for Claude Code now uses `claude mcp add -s user` subprocess instead of writing `~/.claude.json` directly. This lets Claude Code own the config format and is future-proof against format changes. Also cleans up stale project-scoped entries.
+
 ## 0.1.14 - 2026-06-17
 
 ### Fixed
