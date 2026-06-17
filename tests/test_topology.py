@@ -38,6 +38,48 @@ def test_call_graph_has_edges():
     assert len(ctx.call_graph) > 0, "Expected call graph edges from fixture CALLS edges"
 
 
+def test_call_graph_preserves_celery_call_kind():
+    from orgraph.extract.types import ExtractionResult, make_uid
+    from orgraph.topology.call_graph import CALL_KIND_CELERY
+    from orgraph.topology.context import build_repo_context
+
+    caller_uid = make_uid("initiate_refund_request", "/repo/refund.py", 1)
+    task_uid = make_uid("send_mail_task", "/repo/tasks.py", 1)
+    result = ExtractionResult(
+        nodes=[
+            {
+                "uid": caller_uid,
+                "label": "Function",
+                "name": "initiate_refund_request",
+                "path": "/repo/refund.py",
+                "line_number": 1,
+            },
+            {
+                "uid": task_uid,
+                "label": "Function",
+                "name": "send_mail_task",
+                "path": "/repo/tasks.py",
+                "line_number": 1,
+            },
+        ],
+        edges=[
+            {
+                "source_uid": caller_uid,
+                "target_uid": task_uid,
+                "relation": "CALLS",
+                "line_number": 3,
+                "call_kind": CALL_KIND_CELERY,
+            }
+        ],
+    )
+
+    ctx = build_repo_context(result, Path("/repo"))
+    edges = ctx.call_graph.get_callees("/repo/refund.py", "initiate_refund_request")
+    assert len(edges) == 1
+    assert edges[0].call_kind == CALL_KIND_CELERY
+    assert edges[0].call_site_line == 3
+
+
 def test_build_topology_returns_clusters(tmp_path):
     from orgraph.topology.context import build_repo_context
     from orgraph.topology.topology import build_topology_map

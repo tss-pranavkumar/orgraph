@@ -5,10 +5,12 @@ to orgraph's unified NodeDict/EdgeDict schema.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from orgraph.extract.manifest import _CODE_EXTENSIONS, _IGNORED_DIRS
 from orgraph.extract.types import EdgeDict, ExtractionResult, NodeDict, make_uid
+from orgraph.topology.call_graph import CALL_KIND_CELERY
 
 _RELATION_MAP = {
     "calls":       "CALLS",
@@ -46,6 +48,14 @@ _FALCON_HTTP: dict[str, str] = {
     "on_head": "HEAD",
 }
 
+_FALCON_ROUTE_RE = re.compile(
+    r"\.add_route\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*"
+    r"(?P<class>[A-Za-z_][\w.]*)\s*\("
+)
+_CELERY_DISPATCH_RE = re.compile(
+    r"\b(?P<target>[A-Za-z_][\w.]*)\s*\.\s*(?P<method>apply_async|delay)\s*\("
+)
+
 
 def _walk_code_files(repo_path: Path) -> list[Path]:
     files: list[Path] = []
@@ -71,6 +81,19 @@ def _infer_lang(source_file: str) -> str:
     return _EXT_LANG.get(ext, "unknown")
 
 
+def _line_number(source: str, offset: int) -> int:
+    return source.count("\n", 0, offset) + 1
+
+
+def _read_text(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
 class TreeSitterExtractor:
     """Extracts nodes + edges from a repo using graphify's tree-sitter parser."""
 
@@ -90,6 +113,7 @@ class TreeSitterExtractor:
     def _convert(self, raw: dict) -> ExtractionResult:
         raw_nodes: list[dict] = raw.get("nodes", [])
         raw_edges: list[dict] = raw.get("edges", [])
+        class_routes = self._collect_falcon_routes()
 
         # Build method-node-id → class name from graphify's "method" edges.
         # Graphify emits a "method" edge from the class node to each method node.
@@ -155,6 +179,7 @@ class TreeSitterExtractor:
                 bare = name.split(".")[-1]
                 if lang == "python" and bare in _FALCON_HTTP:
                     http_method = _FALCON_HTTP[bare]
+                    http_path = class_routes.get(class_name, "")
 
             uid = make_uid(name, abs_path, line_no)
             id_to_uid[n["id"]] = uid
@@ -204,4 +229,74 @@ class TreeSitterExtractor:
             }
             edges.append(edge)
 
+        edges.extend(self._extract_celery_dispatch_edges(nodes))
         return ExtractionResult(nodes=nodes, edges=edges, extractor="treesitter")
+
+    def _collect_falcon_routes(self) -> dict[str, str]:
+        routes: dict[str, str] = {}
+        for path in _walk_code_files(self.repo_path):
+            if path.suffix != ".py":
+                continue
+            source = _read_text(str(path))
+            for match in _FALCON_ROUTE_RE.finditer(source):
+                class_name = match.group("class").split(".")[-1]
+                routes.setdefault(class_name, match.group("path"))
+        return routes
+
+    def _extract_celery_dispatch_edges(self, nodes: list[NodeDict]) -> list[EdgeDict]:
+        functions = [n for n in nodes if n.get("label") == "Function" and n.get("uid")]
+        by_name: dict[str, NodeDict] = {}
+        by_path: dict[str, list[NodeDict]] = {}
+
+        for node in functions:
+            name = node.get("name", "")
+            if not name:
+                continue
+            by_name.setdefault(name, node)
+            by_name.setdefault(name.split(".")[-1], node)
+            by_path.setdefault(node.get("path", ""), []).append(node)
+
+        for path_nodes in by_path.values():
+            path_nodes.sort(key=lambda n: n.get("line_number", 0))
+
+        edges: list[EdgeDict] = []
+        seen: set[tuple[str, str, int]] = set()
+        for path, path_nodes in by_path.items():
+            if not path or not path.endswith(".py"):
+                continue
+            source = _read_text(path)
+            if not source:
+                continue
+            for match in _CELERY_DISPATCH_RE.finditer(source):
+                line_no = _line_number(source, match.start())
+                target_name = match.group("target").split(".")[-1]
+                target = by_name.get(target_name)
+                caller = self._enclosing_function(path_nodes, line_no)
+                if not caller or not target:
+                    continue
+                src_uid = caller.get("uid", "")
+                dst_uid = target.get("uid", "")
+                key = (src_uid, dst_uid, line_no)
+                if not src_uid or not dst_uid or src_uid == dst_uid or key in seen:
+                    continue
+                seen.add(key)
+                edges.append({
+                    "source_uid": src_uid,
+                    "target_uid": dst_uid,
+                    "relation": "CALLS",
+                    "confidence": "INFERRED",
+                    "line_number": line_no,
+                    "call_kind": CALL_KIND_CELERY,
+                })
+        return edges
+
+    @staticmethod
+    def _enclosing_function(nodes: list[NodeDict], line_no: int) -> NodeDict | None:
+        caller: NodeDict | None = None
+        for node in nodes:
+            node_line = node.get("line_number", 0)
+            if node_line and node_line < line_no:
+                caller = node
+            elif node_line >= line_no:
+                break
+        return caller
