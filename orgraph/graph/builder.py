@@ -100,6 +100,30 @@ class GraphBuilder:
         self.db = db
         self.repo_path = repo_path
 
+    def delete_file_nodes(self, file_path: str) -> int:
+        """Delete all symbol nodes belonging to a file. Returns count deleted."""
+        count = 0
+        for label in ("Function", "Class", "Interface", "Struct", "Enum", "Variable"):
+            try:
+                rows = self.db.query_to_dicts(
+                    f"MATCH (n:{label}) WHERE n.path = $path RETURN n.uid AS uid",
+                    {"path": file_path},
+                )
+                for row in rows:
+                    self.db.execute(
+                        f"MATCH (n:{label} {{uid: $uid}}) DETACH DELETE n",
+                        {"uid": row["uid"]},
+                    )
+                    count += 1
+            except Exception:
+                pass
+        # delete the File node itself
+        try:
+            self.db.execute("MATCH (f:File {path: $path}) DETACH DELETE f", {"path": file_path})
+        except Exception:
+            pass
+        return count
+
     def ingest(self, result: ExtractionResult) -> tuple[int, int]:
         """Write nodes then edges. Returns (nodes_written, edges_written)."""
         node_count = self._write_nodes(result)

@@ -63,6 +63,16 @@ class Manifest:
                 changed.append(p)
         return changed
 
+    def deleted_files(self, repo_path: Path) -> list[str]:
+        """Return absolute paths that were indexed but no longer exist on disk."""
+        current = {str(p) for p in _walk_repo(repo_path)}
+        return [p for p in self._hashes if p not in current]
+
+    def remove(self, paths: list[str]) -> None:
+        """Drop paths from the manifest (call after deleting their nodes)."""
+        for p in paths:
+            self._hashes.pop(p, None)
+
     def all_files(self, repo_path: Path) -> list[Path]:
         return _walk_repo(repo_path)
 
