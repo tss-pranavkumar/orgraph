@@ -20,6 +20,8 @@ def claude_mcp_add(name: str, command: str, args: list[str], scope: str = "user"
     claude = _claude_bin()
     if not claude:
         return "error"
+    # `claude mcp add` errors if the entry already exists — remove first if present
+    subprocess.run([claude, "mcp", "remove", "-s", scope, name], capture_output=True)
     result = subprocess.run(
         [claude, "mcp", "add", "-s", scope, name, command, *args],
         capture_output=True, text=True,
