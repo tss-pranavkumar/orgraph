@@ -1,6 +1,9 @@
 """Thin wrapper around Kuzu's native Python API."""
 from __future__ import annotations
 
+import shutil
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,3 +40,23 @@ class OrgraphDB:
     def close(self) -> None:
         del self._conn
         del self._db
+
+
+@contextmanager
+def open_db_readonly(db_path: Path):
+    """Open a Kuzu DB for read-only queries alongside a running server.
+
+    Kuzu acquires an exclusive lock even with read_only=True, so we copy the
+    DB directory to a temp location and open that instead.
+    """
+    tmp = tempfile.mkdtemp(prefix="orgraph_ro_")
+    tmp_db = Path(tmp) / "graph.kuzu"
+    try:
+        shutil.copytree(str(db_path), str(tmp_db))
+        db = OrgraphDB(tmp_db)
+        try:
+            yield db
+        finally:
+            db.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

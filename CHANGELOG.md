@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.22 - 2026-06-17
+
+### Changed
+- **Extracted `graph/query.py`** — all raw Kuzu queries moved to a single shared module. `cli.py` and `mcp/tools.py` now call `query.*` functions instead of embedding query strings. No duplicate BFS or symbol-lookup logic anywhere.
+- **Moved `open_db_readonly()` to `graph/kuzu.py`** — the context manager that copies the DB to a temp dir (avoiding lock conflicts with the running MCP server) now lives in the DB layer where it belongs. `cli.py` imports it from there.
+- `_symbols_for_file` and `_resolve_indexed_file_path` in `mcp/tools.py` are now thin shims over `query.get_file_symbols` and `query.resolve_file_path`.
+
 ## 0.1.21 - 2026-06-17
 
 ### Added
