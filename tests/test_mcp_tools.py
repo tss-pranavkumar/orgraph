@@ -267,3 +267,93 @@ def test_get_dependencies_imported_by(full_index):
     result = tools["get_dependencies"](file_path="models.py", direction="imported_by", depth=1)
     assert isinstance(result, dict)
     assert "deps" in result
+
+
+# ── truncation flags ─────────────────────────────────────────────────────────
+
+def test_trace_reports_truncated_flag(full_index):
+    db, idx, topology, communities, repo_path = full_index
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["trace"](symbol="authenticate")
+    assert result["truncated"] is False  # tiny fixture never hits the cap
+
+
+def test_get_dependencies_reports_truncated_flag(full_index):
+    db, idx, topology, communities, repo_path = full_index
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["get_dependencies"](file_path="handlers.py")
+    assert "truncated" in result
+
+
+# ── trace ambiguity ──────────────────────────────────────────────────────────
+
+def test_trace_disambiguates_duplicate_names(tmp_path):
+    target = tmp_path / "dup"
+    target.mkdir()
+    (target / "a.py").write_text("def process():\n    return 1\n", encoding="utf-8")
+    (target / "b.py").write_text("def process():\n    return 2\n", encoding="utf-8")
+    db, idx, topology, communities, repo_path = _build_full_index_from_path(target)
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+
+    result = tools["trace"](symbol="process", direction="callees", depth=1)
+    assert result["found"] is True
+    assert result["alternatives"], "expected the other 'process' as an alternative"
+    assert "truncated" in result
+
+    pinned = tools["trace"](symbol="process", direction="callees", depth=1, file="b.py")
+    assert "b.py" in pinned["root_file"]
+
+
+# ── reindex tool ─────────────────────────────────────────────────────────────
+
+def _write_manifest(repo_path: Path) -> None:
+    from orgraph.extract.manifest import Manifest
+    m = Manifest(repo_path / ".orgraph")
+    m.update(m.all_files(repo_path))
+    m.save()
+
+
+def _cross_file_calls(db, caller_frag: str, callee_frag: str) -> int:
+    rows = db.query_to_dicts(
+        "MATCH (caller:Function)-[:CALLS]->(callee) "
+        "WHERE caller.path CONTAINS $a AND callee.path CONTAINS $b "
+        "RETURN count(*) AS n",
+        {"a": caller_frag, "b": callee_frag},
+    )
+    return rows[0]["n"] if rows else 0
+
+
+def test_reindex_no_changes_is_noop(tmp_path):
+    db, idx, topology, communities, repo_path = _build_full_index(tmp_path)
+    _write_manifest(repo_path)
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+    result = tools["reindex"](repo=str(repo_path))
+    assert result["status"] == "up_to_date"
+
+
+def test_reindex_rebuilds_and_preserves_cross_file_edges(tmp_path):
+    db, idx, topology, communities, repo_path = _build_full_index(tmp_path)
+    _write_manifest(repo_path)
+    tools = _get_tools(db, idx, topology, communities, repo_path)
+
+    before = _cross_file_calls(db, "handlers", "auth")
+    assert before >= 1, "fixture should have handlers->auth cross-file calls"
+
+    # Modify the CALLEE file. The old delta path dropped incoming handlers->auth
+    # edges on this exact scenario; a full rebuild must preserve them.
+    auth = repo_path / "auth.py"
+    auth.write_text(auth.read_text(encoding="utf-8") + "\n# touched\n", encoding="utf-8")
+
+    result = tools["reindex"](repo=str(repo_path))
+    assert result["status"] == "updated"
+    assert result["changed_files"] >= 1
+
+    after = _cross_file_calls(db, "handlers", "auth")
+    assert after >= before, "cross-file caller edges must survive reindex"
+
+    # Topology must cover every indexed file, not just the changed one.
+    from orgraph.topology.serialise import load_topology
+    topo = load_topology(repo_path / ".orgraph")
+    file_paths = {r["path"] for r in db.query_to_dicts("MATCH (f:File) RETURN f.path AS path")}
+    for fp in file_paths:
+        assert fp in topo.file_cluster_id, f"{fp} not assigned to a cluster after reindex"

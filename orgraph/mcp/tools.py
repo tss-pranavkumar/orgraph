@@ -294,12 +294,17 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         repo: str = "",
         direction: str = "callees",
         depth: int = 3,
+        file: str = "",
     ) -> dict[str, Any]:
         """Trace the call chain from a function or class symbol.
 
         direction: 'callees' (what this symbol calls) or 'callers' (what calls it).
         depth: how many hops to follow (max 5).
+        file: optional path fragment to disambiguate when several symbols share a name.
         Pass `repo` as the absolute path to the project.
+
+        If the name is ambiguous, the traced symbol is in 'root' and the others are
+        listed under 'alternatives'. 'truncated' is true when the chain hit its cap.
         """
         from orgraph.graph import query as gq
 
@@ -324,16 +329,32 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             return {"root": symbol, "found": False, "chain": []}
 
         root = roots[0]
+        if file:
+            for r in roots:
+                if file in (r.get("path") or ""):
+                    root = r
+                    break
         chain = gq.traverse_calls(state.db, root["uid"], direction, depth)
 
-        return {
+        result: dict[str, Any] = {
             "root": root["name"],
             "root_file": root["path"],
             "root_line": root.get("line") or 0,
             "direction": direction,
             "found": True,
             "chain": chain,
+            "truncated": len(chain) >= 100,
         }
+        if len(roots) > 1:
+            result["alternatives"] = [
+                {"name": r["name"], "file": r["path"], "line": r.get("line") or 0}
+                for r in roots if r["uid"] != root["uid"]
+            ][:5]
+            result["note"] = (
+                "Multiple symbols matched this name; traced the one in 'root'. "
+                "Pass `file=` (a path fragment) to trace a different match."
+            )
+        return result
 
     # ── Tool 3: get_context ─────────────────────────────────────────────────
 
@@ -423,7 +444,13 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             result["cluster_related_files"] = [
                 f for f in cluster.all_files[:10] if f != file_path
             ]
-        result["community_peers"] = _community_peers(state, community_id_for_file, uid, file_path)
+        peers = _community_peers(state, community_id_for_file, uid, file_path)
+        result["community_peers"] = peers
+        community_size = (
+            len(state.communities.get(community_id_for_file, []))
+            if (state.communities and community_id_for_file is not None) else 0
+        )
+        result["community_peers_truncated"] = community_size - 1 > len(peers)
         return result
 
     # ── Tool 3b: list_symbols ───────────────────────────────────────────────
@@ -517,6 +544,19 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
                         "cluster": cluster_id,
                     })
 
+        if len(out) > 50:
+            # Backward-compatible truncation signal: a trailing notice item that still
+            # carries a 'symbol' key so callers iterating item["symbol"] don't break.
+            shown = out[:50]
+            shown.append({
+                "kind": "truncation_notice",
+                "symbol": "",
+                "truncated": True,
+                "total": len(out),
+                "shown": 50,
+                "note": "Result truncated. Narrow with kind='http' or kind='tasks'.",
+            })
+            return shown
         return out[:50]
 
     # ── Tool 5: get_dependencies ────────────────────────────────────────────
@@ -551,6 +591,7 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             "depth": min(depth, 3),
             "deps": deps,
             "dep_count": len(deps),
+            "truncated": len(deps) >= 100,
         }
 
     # ── Tool 6: reindex ─────────────────────────────────────────────────────
@@ -559,23 +600,17 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
     def reindex(repo: str = "", force: bool = False) -> dict[str, Any]:
         """Re-index this repo to pick up new, modified, or deleted files.
 
-        Detects changes via file-hash manifest — only re-extracts what changed.
-        Use force=True to re-index everything.
+        A file-hash manifest gates the work: if nothing changed, this is a no-op.
+        When something changed, the graph, topology, and communities are fully
+        rebuilt — extraction is AST-cached, so unchanged files are not re-parsed —
+        and the search index is re-embedded (semble has no incremental API).
+        Use force=True to rebuild even when the manifest reports no changes.
         Pass `repo` as the absolute path to the project.
         """
         import time
         from orgraph.extract.manifest import Manifest
-        from orgraph.extract.treesitter import TreeSitterExtractor
-        from orgraph.graph.builder import GraphBuilder
-        from orgraph.graph.schema import create_schema
+        from orgraph.graph.pipeline import build_index
         from orgraph.search.index import SearchIndex
-        from orgraph.topology.cluster import build_nx_graph_from_result, cluster
-        from orgraph.topology.context import build_repo_context
-        from orgraph.topology.serialise import (
-            load_communities, load_topology,
-            save_communities, save_topology,
-        )
-        from orgraph.topology.topology import build_topology_map
 
         state = _get_state(repo)
         if state is None:
@@ -590,64 +625,33 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         manifest = Manifest(orgraph_dir)
         manifest.load()
 
-        if force:
-            changed = manifest.all_files(repo_path)
-            deleted: list[str] = []
-        else:
-            changed = manifest.changed_files(repo_path)
-            deleted = manifest.deleted_files(repo_path)
+        changed = manifest.all_files(repo_path) if force else manifest.changed_files(repo_path)
+        deleted = [] if force else manifest.deleted_files(repo_path)
 
         if not changed and not deleted:
             return {"status": "up_to_date", "changed_files": 0, "deleted_files": 0}
 
-        builder = GraphBuilder(db=state.db, repo_path=repo_path)
+        stats = build_index(state.db, repo_path, orgraph_dir, rebuild_search=True)
 
-        deleted_nodes = 0
-        for path_str in deleted:
-            deleted_nodes += builder.delete_file_nodes(path_str)
-        manifest.remove(deleted)
+        # Refresh in-memory server state from the freshly built artifacts
+        state.idx = SearchIndex.load(repo_path)
+        state.topology = stats["topology"]
+        state.communities = stats["communities_map"]
+        state.rebuild_lookups()
 
-        nodes_added = 0
-        if changed:
-            for p in changed:
-                builder.delete_file_nodes(str(p))
-
-            ts = TreeSitterExtractor(repo_path=repo_path)
-            from orgraph._vendor.extract import extract as _extract
-            raw = _extract(changed, cache_root=None, parallel=True)
-            result = ts._convert(raw)
-
-            create_schema(state.db)
-            nodes_added, _ = builder.ingest(result)
-
-            ctx = build_repo_context(result, repo_path)
-            topology = build_topology_map(ctx)
-            full_ts = TreeSitterExtractor(repo_path=repo_path)
-            full_raw = _extract(manifest.all_files(repo_path), cache_root=None, parallel=True)
-            full_result = full_ts._convert(full_raw)
-            G = build_nx_graph_from_result(full_result)
-            communities = cluster(G)
-
-            save_topology(topology, orgraph_dir)
-            save_communities(communities, orgraph_dir)
-
-            SearchIndex.build(repo_path)
-            new_idx = SearchIndex.load(repo_path)
-
-            state.idx = new_idx
-            state.topology = topology
-            state.communities = communities
-            state.rebuild_lookups()
-
-        manifest.update(changed)
+        # Rebuild the manifest to exactly match what's on disk now
+        manifest.update(manifest.all_files(repo_path))
+        manifest.remove(manifest.deleted_files(repo_path))
         manifest.save()
 
         return {
             "status": "updated",
             "changed_files": len(changed),
             "deleted_files": len(deleted),
-            "deleted_nodes": deleted_nodes,
-            "nodes_added": nodes_added,
+            "nodes": stats["nodes"],
+            "edges": stats["edges"],
+            "clusters": stats["clusters"],
+            "communities": stats["communities"],
             "elapsed_s": round(time.perf_counter() - t0, 1),
         }
 

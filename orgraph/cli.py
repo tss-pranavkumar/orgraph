@@ -28,16 +28,8 @@ def main() -> None:
 def index(repo_path: str, force: bool) -> None:
     """Index a repo: extract nodes/edges, build topology + communities, store in Kuzu graph."""
     from orgraph.extract.manifest import Manifest
-    from orgraph.extract.scip import ScipExtractor
-    from orgraph.extract.treesitter import TreeSitterExtractor
-    from orgraph.graph.builder import GraphBuilder
     from orgraph.graph.kuzu import OrgraphDB
-    from orgraph.graph.schema import create_schema
-    from orgraph.search.index import SearchIndex
-    from orgraph.topology.cluster import build_nx_graph_from_result, cluster
-    from orgraph.topology.context import build_repo_context
-    from orgraph.topology.serialise import save_communities, save_topology
-    from orgraph.topology.topology import build_topology_map
+    from orgraph.graph.pipeline import build_index
 
     repo = Path(repo_path).resolve()
     orgraph_dir = _orgraph_dir(repo)
@@ -48,60 +40,25 @@ def index(repo_path: str, force: bool) -> None:
         manifest.load()
 
     t0 = time.perf_counter()
-
-    # --- Extraction ---
     console.print(f"[bold cyan]orgraph[/] indexing [yellow]{repo}[/]")
 
-    result = None
-
-    scratch = orgraph_dir / "scip_scratch"
-    scip = ScipExtractor(repo_path=repo, scratch_dir=scratch)
-    with console.status("Trying SCIP extraction…"):
-        result = scip.run()
-
-    if result is not None:
-        console.print(f"  [green]✓[/] SCIP extraction: {result.node_count()} nodes, {result.edge_count()} edges")
-    else:
-        console.print("  [dim]SCIP not available — falling back to tree-sitter[/]")
-        with console.status("tree-sitter extraction…"):
-            ts = TreeSitterExtractor(repo_path=repo)
-            result = ts.run()
-        console.print(f"  [green]✓[/] tree-sitter extraction: {result.node_count()} nodes, {result.edge_count()} edges")
-
-    # --- Graph storage ---
     db_path = orgraph_dir / "graph.kuzu"
-    with console.status("Writing to Kuzu…"):
-        db = OrgraphDB(db_path)
-        create_schema(db)
-        builder = GraphBuilder(db=db, repo_path=repo)
-        nodes_written, edges_written = builder.ingest(result)
+    db = OrgraphDB(db_path)
+    try:
+        with console.status("Building index (extract → graph → topology → communities → search)…"):
+            stats = build_index(db, repo, orgraph_dir, rebuild_search=True)
+    finally:
         db.close()
 
-    # --- Topology ---
-    with console.status("Building topology clusters…"):
-        ctx = build_repo_context(result, repo)
-        topology = build_topology_map(ctx)
-
-    non_foundational = [c for c in topology.clusters if not c.is_foundational]
     console.print(
-        f"  [green]✓[/] Topology: [bold]{len(non_foundational)}[/] clusters"
-        f" + {'1 foundational' if topology.foundational_files else '0 foundational'}"
+        f"  [green]✓[/] Extraction ({stats['extractor']}): "
+        f"{stats['node_count']} nodes, {stats['edge_count']} edges"
     )
-
-    # --- Leiden community detection ---
-    with console.status("Running Leiden community detection…"):
-        G = build_nx_graph_from_result(result)
-        communities = cluster(G)
-
-    console.print(f"  [green]✓[/] Communities: [bold]{len(communities)}[/] (Leiden/Louvain)")
-
-    # --- Persist topology + communities ---
-    save_topology(topology, orgraph_dir)
-    save_communities(communities, orgraph_dir)
-
-    # --- Search index ---
-    with console.status("Building semble search index…"):
-        SearchIndex.build(repo)
+    console.print(
+        f"  [green]✓[/] Topology: [bold]{stats['clusters']}[/] clusters"
+        f" ({'with' if stats['foundational'] else 'no'} foundational)"
+    )
+    console.print(f"  [green]✓[/] Communities: [bold]{stats['communities']}[/] (Leiden/Louvain)")
     console.print("  [green]✓[/] Search index built (.orgraph/search/)")
 
     # --- Manifest ---
@@ -110,8 +67,8 @@ def index(repo_path: str, force: bool) -> None:
 
     elapsed = time.perf_counter() - t0
     console.print(
-        f"\n[bold green]Done.[/] Indexed [bold]{nodes_written}[/] nodes, "
-        f"[bold]{edges_written}[/] edges in [bold]{elapsed:.1f}s[/]"
+        f"\n[bold green]Done.[/] Indexed [bold]{stats['nodes']}[/] nodes, "
+        f"[bold]{stats['edges']}[/] edges in [bold]{elapsed:.1f}s[/]"
     )
     console.print(f"  Graph at: [dim]{db_path}[/]")
 

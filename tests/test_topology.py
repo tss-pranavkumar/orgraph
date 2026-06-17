@@ -145,6 +145,28 @@ def test_topology_json_roundtrip(tmp_path):
     assert loaded.foundational_files == topology.foundational_files
 
 
+def test_build_index_topology_matches_direct(tmp_path):
+    """Topology from the shared build_index pipeline matches a direct build on the same result."""
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.pipeline import build_index
+    from orgraph.topology.context import build_repo_context
+    from orgraph.topology.topology import build_topology_map
+
+    result, target = _get_result_outside_tests(tmp_path)
+    direct = build_topology_map(build_repo_context(result, target))
+
+    orgraph_dir = target / ".orgraph"
+    orgraph_dir.mkdir(parents=True, exist_ok=True)
+    db = OrgraphDB(orgraph_dir / "graph.kuzu")
+    try:
+        stats = build_index(db, target, orgraph_dir, rebuild_search=False, result=result)
+    finally:
+        db.close()
+
+    assert stats["clusters"] == len(direct.clusters)
+    assert stats["communities"] >= 1
+
+
 def test_communities_json_roundtrip(tmp_path):
     from orgraph.topology.cluster import build_nx_graph_from_result, cluster
     from orgraph.topology.serialise import load_communities, save_communities

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.24 - 2026-06-17
+
+### Fixed
+- **`reindex` no longer corrupts the graph or desyncs topology.** The old incremental path
+  re-extracted the whole repo *twice*, built topology from only the changed files (so topology and
+  communities disagreed), and — via `delete_file_nodes` + `DETACH DELETE` — silently dropped incoming
+  `caller→callee` CALLS edges from unchanged callers, eroding the graph on every reindex. `reindex` is
+  now a manifest-gated **full rebuild**: no-op when nothing changed, otherwise one cache-backed
+  extraction → graph wipe + rebuild → topology + communities from the same result → search re-embed.
+
+### Changed
+- **Shared `graph/pipeline.py::build_index`** now powers both `orgraph index` (CLI) and the `reindex`
+  MCP tool, so they can't diverge. Added `GraphBuilder.clear()` (wipes all nodes/edges for a clean
+  rebuild). `TreeSitterExtractor` passes `cache_root=repo_path` for a stable AST cache.
+- **Honest tool results.** `trace`, `get_dependencies`, and `get_context` now return a `truncated`
+  flag when a result cap is hit. `find_entry_points` appends a `truncation_notice` item when capped
+  (still list-shaped, carries a `symbol` key — backward compatible).
+- **`trace` disambiguates ambiguous names.** When several symbols share a name it traces the first,
+  lists the rest under `alternatives` with a `note`, and accepts a new `file=` path-fragment argument
+  to pin a specific definition (previously it silently used `roots[0]`).
+
+### Known follow-up
+- The graphify AST cache still writes to `graphify-out/` in the indexed repo root; it should move
+  under `.orgraph/` via the `GRAPHIFY_OUT` env var. Deferred (committed fixture cache + orphaning).
+
 ## 0.1.23 - 2026-06-17
 
 ### Changed
