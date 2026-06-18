@@ -10,6 +10,18 @@ from typing import Any
 
 from orgraph.graph.kuzu import OrgraphDB
 
+# Named code symbols (label, human kind), in resolution-priority order. Functions
+# first (the usual query target), then types. Interface/Enum/Struct are listed so
+# `resolve_symbol`/`lookup_symbol_by_uid`/`list_file_symbols` find them — SCIP now
+# labels these distinctly instead of lumping everything into Class.
+_SYMBOL_KINDS: tuple[tuple[str, str], ...] = (
+    ("Function", "function"),
+    ("Class", "class"),
+    ("Interface", "interface"),
+    ("Enum", "enum"),
+    ("Struct", "struct"),
+)
+
 # ── Enclosing symbol ──────────────────────────────────────────────────────────
 
 def get_enclosing_symbol(db: OrgraphDB, file_path: str, line: int) -> dict[str, Any] | None:
@@ -41,7 +53,7 @@ def resolve_symbol(db: OrgraphDB, name: str) -> list[dict[str, Any]]:
     Searches Function first, then Class. Returns [{uid, name, path, line}].
     """
     for exact in (True, False):
-        for label in ("Function", "Class"):
+        for label, _kind in _SYMBOL_KINDS:
             q = (
                 f"MATCH (s:{label}) WHERE s.name = $name "
                 "RETURN s.uid AS uid, s.name AS name, s.path AS path, s.line_number AS line LIMIT 5"
@@ -57,7 +69,7 @@ def resolve_symbol(db: OrgraphDB, name: str) -> list[dict[str, Any]]:
 
 def lookup_symbol_by_uid(db: OrgraphDB, uid: str) -> dict[str, Any] | None:
     """Return {uid, name, path, line, kind} for a known uid, or None."""
-    for label, kind in (("Function", "function"), ("Class", "class")):
+    for label, kind in _SYMBOL_KINDS:
         rows = db.query_to_dicts(
             f"MATCH (s:{label}) WHERE s.uid = $uid "
             "RETURN s.uid AS uid, s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
@@ -192,7 +204,7 @@ def get_file_symbols(
     Returns [{uid, name, kind, path, line}].
     """
     rows: list[dict[str, Any]] = []
-    for label, kind in (("Function", "function"), ("Class", "class")):
+    for label, kind in _SYMBOL_KINDS:
         part = db.query_to_dicts(
             f"MATCH (s:{label}) WHERE s.path = $path "
             "RETURN s.uid AS uid, s.name AS name, s.path AS path, s.line_number AS line",

@@ -128,11 +128,13 @@ _EDGE_TABLES = [
         FROM Class TO Interface,
         FROM Interface TO Interface,
         FROM Struct TO Struct,
+        line_number INT64,
         confidence STRING
     )""",
     """CREATE REL TABLE IF NOT EXISTS CONTAINS(
         FROM File TO Function,
         FROM File TO Class,
+        FROM File TO Interface,
         FROM File TO Enum,
         FROM File TO Struct,
         FROM File TO Variable,
@@ -151,9 +153,31 @@ _EDGE_TABLES = [
 ]
 
 
+# Idempotent column additions for graphs built by an older schema version.
+# Kuzu's CREATE ... IF NOT EXISTS never alters an existing table, so a DB created
+# before a column was introduced keeps the old shape — e.g. a stale CALLS table
+# without call_kind silently rejects every `SET r.call_kind = ...` edge write.
+_MIGRATIONS = [
+    "ALTER TABLE CALLS ADD call_kind STRING DEFAULT 'local'",
+    # INHERITS originally shipped with only `confidence`, but _write_edges always
+    # sets line_number; without this column every INHERITS write silently fails.
+    "ALTER TABLE INHERITS ADD line_number INT64 DEFAULT 0",
+]
+
+
 def create_schema(db: OrgraphDB) -> None:
-    """Create all node and edge tables. Safe to call on an existing DB (IF NOT EXISTS)."""
+    """Create all node and edge tables. Safe to call on an existing DB (IF NOT EXISTS).
+
+    Also applies idempotent column migrations so a graph built by an older orgraph
+    version gains columns added later (each ALTER raises if the column already
+    exists, which is the expected no-op on an up-to-date DB).
+    """
     for ddl in _NODE_TABLES:
         db.execute(ddl)
     for ddl in _EDGE_TABLES:
         db.execute(ddl)
+    for ddl in _MIGRATIONS:
+        try:
+            db.execute(ddl)
+        except Exception:
+            pass  # column already present — table was created at the current version
