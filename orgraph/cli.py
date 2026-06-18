@@ -169,7 +169,28 @@ def status(repo_path: str) -> None:
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 @click.option("--top-k", default=10, show_default=True)
 def search(query: str, repo_path: str, top_k: int) -> None:
-    """Hybrid BM25+semantic search over a repo's code."""
+    """Find code by describing what it does — semantic + keyword search.
+
+    Understands meaning, not just exact strings. Write a descriptive phrase,
+    not a function name. Results are ranked ●●●/●●○/●○○ by relevance.
+
+    \b
+    OPTIONS:
+      --top-k   How many results to return (default 10). Lower it to cut noise,
+                raise it if you suspect the right result is buried.
+
+    \b
+    EXAMPLES:
+      orgraph search "coupon validation logic" .
+      orgraph search "order cancellation refund" .
+      orgraph search "birthday coupon auto apply" . --top-k 5
+
+    \b
+    TIPS:
+      - Use a phrase, not a single word. "theme sync" beats "theme".
+      - Top results (●●●) are reliable. Below ●●○ treat as noise.
+      - Use this to find where something lives, then use `file` or open it.
+    """
     from orgraph.graph import query as gq
     from orgraph.graph.kuzu import open_db_readonly
     from orgraph.search.index import SearchIndex
@@ -300,7 +321,25 @@ def eval(repo_path: str, ground_truth: str | None, top_k: int, output: str | Non
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 @click.option("--depth", default=1, show_default=True, help="How many hops up the call chain.")
 def who_calls(symbol: str, repo_path: str, depth: int) -> None:
-    """Show every place SYMBOL is called, with file and line number."""
+    """Show every place SYMBOL is called — use before changing a function.
+
+    Answers: "what breaks if I edit this?" High caller count = risky change.
+
+    \b
+    DEPTH: hops UP the call chain (who calls the callers).
+      --depth 1 (default): direct callers only.
+                           "What calls get_valid_coupon directly?"
+      --depth 2:           callers of callers.
+                           "What calls the things that call get_valid_coupon?"
+      --depth 3:           three levels up — full upstream blast radius.
+    Start at 1. Go deeper only if you need to understand the full chain.
+
+    \b
+    EXAMPLES:
+      orgraph who-calls get_valid_coupon .
+      orgraph who-calls build_order_model . --depth 2
+      orgraph who-calls apply_coupon .
+    """
     repo = Path(repo_path).resolve()
     db_path = _orgraph_dir(repo) / "graph.kuzu"
     if not db_path.exists():
@@ -364,7 +403,35 @@ def who_calls(symbol: str, repo_path: str, depth: int) -> None:
 @click.option("--callers", "direction", flag_value="callers", help="Show what calls SYMBOL instead.")
 @click.option("--callees", "direction", flag_value="callees", default=True, help="Show what SYMBOL calls (default).")
 def trace(symbol: str, repo_path: str, depth: int, direction: str) -> None:
-    """Trace the call chain from SYMBOL — what it calls (or what calls it)."""
+    """Trace the call chain from SYMBOL — understand a flow top-down or bottom-up.
+
+    Default (--callees): follows what SYMBOL calls. Use to understand what
+    happens when a function runs — the full execution path downward.
+
+    With --callers: shows what calls SYMBOL upward. Similar to who-calls
+    but as an indented tree instead of a flat table.
+
+    \b
+    DEPTH: hops DOWN (callees) or UP (callers) the call chain. Max 5.
+      --depth 1: only the direct calls from SYMBOL.
+      --depth 2 (default): calls, and what those call.
+      --depth 3: three levels — recommended for understanding a full flow.
+      --depth 5: maximum. Use for deep or unfamiliar codebases.
+    Higher depth = more of the chain, but also more noise.
+
+    \b
+    WHO-CALLS vs TRACE --CALLERS:
+      Same direction (upward), different output shape.
+      who-calls → flat table, easy to scan for a list of callers.
+      trace --callers → indented tree, shows the chain structure.
+
+    \b
+    EXAMPLES:
+      orgraph trace apply_coupon .                   # what does it call?
+      orgraph trace apply_coupon . --depth 4         # go deeper
+      orgraph trace apply_coupon . --callers         # what calls it? (tree)
+      orgraph trace Coupon.on_post . --depth 3       # full handler flow
+    """
     repo = Path(repo_path).resolve()
     db_path = _orgraph_dir(repo) / "graph.kuzu"
     if not db_path.exists():
@@ -409,7 +476,16 @@ def trace(symbol: str, repo_path: str, depth: int, direction: str) -> None:
 @click.argument("file_path")
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 def file_symbols(file_path: str, repo_path: str) -> None:
-    """List all functions and classes defined in FILE_PATH."""
+    """List every function and class defined in a file, with line numbers.
+
+    Use this as a table of contents before opening a file — you'll know
+    exactly what's in it and which line to jump to.
+
+    \b
+    EXAMPLES:
+      orgraph file controllers/DiscountController.py .
+      orgraph file libs/OrderHelper.py .
+    """
     repo = Path(repo_path).resolve()
     db_path = _orgraph_dir(repo) / "graph.kuzu"
     if not db_path.exists():
@@ -448,10 +524,32 @@ def file_symbols(file_path: str, repo_path: str) -> None:
 @click.argument("file_or_symbol")
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 def context(file_or_symbol: str, repo_path: str) -> None:
-    """Show architectural context for a file path or symbol name.
+    """Show the architectural position of a file or symbol before you edit it.
 
-    Displays topology cluster, community, call depth, indegree, related files,
-    and community peers — useful before editing to understand blast radius.
+    Answers: "how central is this, and what moves with it?" Use this to
+    understand blast radius before making a change.
+
+    \b
+    OUTPUT FIELDS:
+      cluster         — group of files tightly coupled to this one. Changing
+                        one often means changing the others.
+      cluster files   — how many files are in that cluster.
+      foundational    — yes means many things depend on it; change carefully.
+      community       — Leiden community ID. Functions in the same community
+                        tend to change together across commits.
+      call depth      — 0 = entry point (nothing calls it from above).
+                        Higher = deeper in the stack, called by many layers.
+      indegree        — how many functions call this one directly.
+                        High indegree = widely used = risky to change.
+      cluster files   — other files in the same tight cluster.
+      community peers — other functions that statistically move with this one
+                        (not necessarily callers — just co-change frequently).
+
+    \b
+    EXAMPLES:
+      orgraph context controllers/DiscountController.py .
+      orgraph context get_valid_coupon .
+      orgraph context libs/OrderHelper.py .
     """
     from pathlib import Path as P
     from orgraph.graph.kuzu import open_db_readonly
@@ -591,7 +689,37 @@ def context(file_or_symbol: str, repo_path: str) -> None:
               help="imports: what this file depends on. imported_by: what depends on it.")
 @click.option("--depth", default=1, show_default=True, help="How many hops to traverse (max 3).")
 def deps(file_path: str, repo_path: str, direction: str, depth: int) -> None:
-    """Show the import/dependency tree for a file."""
+    """Show what a file imports, or what imports it — file-level dependencies.
+
+    Operates on import statements, not function calls. This is about module
+    structure, not runtime behaviour. Use before deleting or moving a file.
+
+    \b
+    DIRECTION:
+      imports (default)  — what this file pulls in.
+                           "What do I need to understand before reading this?"
+      imported_by        — what files import this one.
+                           "What breaks if I delete or rename something here?"
+
+    \b
+    DEPTH: import layers to follow. Max 3.
+      --depth 1 (default): direct imports only.
+                           DiscountController.py → MetaInitializers.py
+      --depth 2:           imports of imports (transitive).
+                           DiscountController.py → MetaInitializers.py → db.py
+      --depth 3:           three layers deep — the full dependency web.
+    Higher depth surfaces hidden coupling but adds noise. Start at 1.
+
+    \b
+    NOTE: only sees static `import` statements at the top of files.
+    Dynamic imports (importlib, __import__) are invisible to this command.
+
+    \b
+    EXAMPLES:
+      orgraph deps controllers/DiscountController.py .
+      orgraph deps controllers/DiscountController.py . --direction imported_by
+      orgraph deps libs/OrderHelper.py . --depth 2
+    """
     from orgraph.graph.kuzu import open_db_readonly
     from orgraph.graph import query as gq
 
@@ -644,7 +772,26 @@ def deps(file_path: str, repo_path: str, direction: str, depth: int) -> None:
               type=click.Choice(["http", "tasks", "all"]),
               help="Which entry points to show.")
 def entry_points(repo_path: str, kind: str) -> None:
-    """List HTTP handlers and async tasks detected in this repo."""
+    """List all HTTP handlers and async tasks — the entry points into the system.
+
+    Best first command on a new repo. Gives you the full API surface without
+    needing to know anything about the codebase first.
+
+    To follow what an entry point does, pass its symbol to `trace`:
+      orgraph trace Coupon.on_post . --depth 3
+
+    \b
+    OPTIONS:
+      --kind   http (default): HTTP handlers only.
+               tasks: Celery async tasks only.
+               all: HTTP + tasks together.
+
+    \b
+    EXAMPLES:
+      orgraph entry-points .                   # all HTTP handlers
+      orgraph entry-points . --kind tasks      # Celery async tasks only
+      orgraph entry-points . --kind all        # HTTP + tasks together
+    """
     from orgraph.graph.kuzu import open_db_readonly
     from orgraph.graph import query as gq
     from orgraph.topology.serialise import load_topology
