@@ -32,17 +32,96 @@ The agent picks the right tool automatically based on what you ask.
 
 ## Manual usage
 
+All commands take a repo path as the last argument. It defaults to `.` so you can omit it when you're already inside the repo.
+
+### Setup
+
 ```bash
-# Index a repo manually (optional — serve auto-indexes)
-orgraph index /path/to/repo
+# Build the index (run once, then again after big merges)
+orgraph index .
 
-# Check what was indexed
-orgraph status /path/to/repo
+# Verify the index is healthy — node/edge counts, clusters, communities
+orgraph status .
+```
 
-# Search from the CLI
-orgraph search "authentication middleware" /path/to/repo
+### Finding code
 
-# Start the MCP server
+```bash
+# Find code by describing what it does — semantic + keyword search
+orgraph search "coupon validation logic" .
+orgraph search "order cancellation refund" . --top-k 5
+
+# List every function and class defined in a file (table of contents)
+orgraph file controllers/DiscountController.py .
+
+# See all HTTP endpoints and async tasks in the repo
+orgraph entry-points .                    # HTTP handlers (default)
+orgraph entry-points . --kind tasks       # Celery async tasks
+orgraph entry-points . --kind all         # both together
+```
+
+### Understanding a function before you change it
+
+```bash
+# Who calls this function? (blast radius before editing)
+orgraph who-calls get_valid_coupon .
+orgraph who-calls build_order_model . --depth 2   # callers of callers too
+
+# What does this function call? (trace the flow downward)
+orgraph trace apply_coupon .
+orgraph trace Coupon.on_post . --depth 3          # 3 levels deep
+orgraph trace apply_coupon . --callers            # same as who-calls, tree form
+
+# Architectural position — how central is this, what's coupled to it?
+orgraph context controllers/DiscountController.py .
+orgraph context get_valid_coupon .                # works on symbol names too
+```
+
+`context` shows call depth, indegree (how many things call this), which files are tightly coupled to it, and which functions tend to change together.
+
+### Understanding file dependencies
+
+```bash
+# What does this file import? (what to read before editing it)
+orgraph deps controllers/DiscountController.py .
+
+# What imports this file? (what breaks if you delete or move it)
+orgraph deps controllers/DiscountController.py . --direction imported_by
+
+# Two levels of transitive imports
+orgraph deps libs/OrderHelper.py . --depth 2
+```
+
+`deps` operates on `import` statements, not function calls — it shows module-level coupling, not runtime behaviour.
+
+### Typical workflow on a new codebase
+
+```bash
+# 1. Index it
+orgraph index .
+
+# 2. See all the entry points
+orgraph entry-points .
+
+# 3. Find where something lives
+orgraph search "payment processing" .
+
+# 4. See what's in that file
+orgraph file controllers/OrderController.py .
+
+# 5. Before touching a function — check blast radius
+orgraph who-calls build_order_model .
+
+# 6. Trace what it does
+orgraph trace build_order_model . --depth 3
+
+# 7. Check how central the file is
+orgraph context controllers/OrderController.py .
+```
+
+### MCP server
+
+```bash
 orgraph serve /path/to/repo
 ```
 
