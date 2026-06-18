@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.29 - 2026-06-18
+
+### Changed
+- **All CLI `--help` text rewritten** to be accurate and thorough. Each command
+  now documents only its real options with plain-English explanations, concrete
+  examples using real symbol names, and usage tips. Removed fabricated `DEPTH`
+  sections from commands that have no depth option (`search`, `file`, `context`,
+  `entry-points`).
+
 ## 0.1.28 - 2026-06-18
 
 ### Added
