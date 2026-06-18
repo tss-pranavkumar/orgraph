@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.28 - 2026-06-18
+
+### Added
+- **`orgraph deps <file>`** — new CLI command that shows the import/dependency tree for a file.
+  Accepts `--direction imports|imported_by` (default: `imports`) and `--depth` (default: 1, max 3).
+  Equivalent to the `get_dependencies` MCP tool. CLI and MCP are now fully in sync.
+
 ## 0.1.27 - 2026-06-18
 
 ### Added

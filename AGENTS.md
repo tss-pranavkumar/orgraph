@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.27
+## Current version: 0.1.28
 
 ## What orgraph does
 
@@ -104,8 +104,9 @@ orgraph search <q> <r>            # hybrid BM25+semantic search
 orgraph trace <sym> <repo>        # call chain: what a symbol calls (default) or --callers
 orgraph who-calls <sym> <repo>    # all callsites for a symbol, with file:line
 orgraph file <file> <repo>        # list all functions/classes defined in a file
-orgraph context <file|sym> <repo> # architectural context: cluster, community, indegree, peers
-orgraph entry-points <repo>       # HTTP handlers and async tasks (--kind http|tasks|all)
+orgraph context <file|sym> <repo>  # architectural context: cluster, community, indegree, peers
+orgraph entry-points <repo>        # HTTP handlers and async tasks (--kind http|tasks|all)
+orgraph deps <file> <repo>         # import/dependency tree (--direction imports|imported_by)
 orgraph serve <repo>              # MCP server (stdio)
 ```
 
