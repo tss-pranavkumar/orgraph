@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.27 - 2026-06-18
+
+### Added
+- **`orgraph context <file|symbol>`** — new CLI command that shows architectural context for a file
+  path or symbol name: topology cluster, cluster file count, foundational flag, Leiden community ID,
+  call depth, indegree, related cluster files, and community peers (functions that tend to change
+  together). Equivalent to the `get_context` MCP tool, now available without an AI client.
+- **`orgraph entry-points`** — new CLI command that lists HTTP handlers and async (Celery) tasks
+  detected in the indexed repo as a Rich table. Accepts `--kind http|tasks|all` (default: `http`).
+  Equivalent to the `find_entry_points` MCP tool.
+
 ## 0.1.26 - 2026-06-17
 
 ### Fixed

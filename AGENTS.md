@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.26
+## Current version: 0.1.27
 
 ## What orgraph does
 
@@ -92,16 +92,21 @@ orgraph/
 - **tree-sitter grammars**: the bundled extractor (`_vendor/extract.py`) dispatches ~25 languages, each importing its grammar lazily and degrading to 0 nodes if the grammar is absent. Core deps ship Python/JS/TS + Go/Rust/Java/C/C++/C#/Ruby/PHP. Other langs (Kotlin/Scala/Groovy/Lua/Swift) use incompatible release schemes — install their grammar manually to enable. `build_index` warns (CLI) / returns `warnings` (MCP) when code files on disk produce no symbols, so a missing grammar surfaces instead of a silent empty index.
 - **`_is_test_file` heuristic**: Files under paths containing `/tests/` or `/test/` are excluded from BFS entry points. Tests that run topology on fixture code must copy fixtures to a non-tests temp dir (`shutil.copytree(FIXTURE, tmp_path / "simple_python")`).
 - **Topology depends on ExtractionResult**: `build_repo_context()` builds CallGraph directly from ExtractionResult CALLS edges, not from Kuzu. Topology runs before DB is closed.
-- **SCIP extraction (`extract/scip.py`)**: `extract_repo` prefers SCIP when a `scip-<lang>` binary is on PATH, else tree-sitter. scip-python is an **npm** package (`@sourcegraph/scip-python`), invoked as `scip-python index --cwd <repo> --output <f> --quiet`. It leaves `SymbolInformation.kind=0` / `display_name` empty — so `_parse_scip` decodes the SCIP **symbol descriptor string** (`_name_from_symbol`, `_label_from_symbol`) and reconstructs CALLS from reference occurrences using `Occurrence.enclosing_range` (`_find_enclosing_symbol`) + a read-from-disk `(`-after-token check (docs carry no embedded `.text`). Falcon routes + celery dispatch are reused from the tree-sitter extractor for parity. Measured on the TSS backend: SCIP CALLS are ~93% compiler-EXTRACTED vs tree-sitter's ~42%, dropping name-collision false positives and catching super()/cross-class calls tree-sitter misses. Test fixture: `tests/fixtures/simple_python.scip` (committed; CI needs no binary).
+- **SCIP extraction (`extract/scip.py`)**: `extract_repo` prefers SCIP when a `scip-<lang>` binary is on PATH, else tree-sitter. scip-python is an **npm** package (`@sourcegraph/scip-python`), invoked as `scip-python index --cwd <repo> --output <f> --quiet`. It leaves `SymbolInformation.kind=0` / `display_name` empty — so `_parse_scip` decodes the SCIP **symbol descriptor string** (`_name_from_symbol`, `_label_from_symbol`) and reconstructs CALLS from reference occurrences using `Occurrence.enclosing_range` (`_find_enclosing_symbol`) + a read-from-disk `(`-after-token check (docs carry no embedded `.text`). Falcon routes + celery dispatch are reused from the tree-sitter extractor for parity. Measured on the TSS backend: SCIP CALLS are ~93% compiler-EXTRACTED vs tree-sitter's ~42%, dropping name-collision false positives and catching super()/cross-class calls tree-sitter misses. The descriptor decoder + enclosing-range call graph are **language-agnostic** (they read the standard SCIP descriptor grammar, not Python specifics) — verified against `scip-typescript` on a real TS repo (nodes, cross-file CALLS, and `extends`→INHERITS all resolve; `scip-typescript` does populate `enclosing_range`). The two Python-only pieces are the install hint and the `--cwd` build-command branch; the Falcon/Celery heuristics are Python-framework-specific (harmless no-ops elsewhere). Test fixtures: `tests/fixtures/simple_python.scip` and `tests/fixtures/simple_typescript.scip` (both committed; CI needs no binary). Live end-to-end tests are `skipif`-guarded on the binary being on PATH.
 - **Leiden falls back to Louvain**: If `graspologic` is not installed, networkx Louvain is used. Both give stable results via seed=42.
 
 ## CLI commands
 
 ```bash
-orgraph index <repo>     # extract → kuzu → topology → leiden → save
-orgraph status <repo>    # node/edge counts + cluster table + community count
-orgraph search <q> <r>   # search (P3 stub)
-orgraph serve <repo>     # MCP server (P4 stub)
+orgraph index <repo>              # extract → kuzu → topology → leiden → save
+orgraph status <repo>             # node/edge counts + cluster table + community count
+orgraph search <q> <r>            # hybrid BM25+semantic search
+orgraph trace <sym> <repo>        # call chain: what a symbol calls (default) or --callers
+orgraph who-calls <sym> <repo>    # all callsites for a symbol, with file:line
+orgraph file <file> <repo>        # list all functions/classes defined in a file
+orgraph context <file|sym> <repo> # architectural context: cluster, community, indegree, peers
+orgraph entry-points <repo>       # HTTP handlers and async tasks (--kind http|tasks|all)
+orgraph serve <repo>              # MCP server (stdio)
 ```
 
 ## Testing
