@@ -1,0 +1,128 @@
+[
+  {
+    "id": "refund_initiation",
+    "query": "how is an automated refund initiated for a cancelled order",
+    "relevant_files": ["libs/RefundHelper.py", "task_helper.py"],
+    "relevant_symbols": ["initiate_refund_request", "initiate_juspay_refund", "initiate_cashgram_refund"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "refund_bank_transfer",
+    "query": "bank transfer refund method validation and execution",
+    "relevant_files": ["task_helper.py", "libs/RefundHelper.py"],
+    "relevant_symbols": ["initiate_refund_request"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "refund_fees",
+    "query": "refund transaction fees threshold calculation automated",
+    "relevant_files": ["libs/RefundHelper.py", "libs/OrderHelper.py"],
+    "relevant_symbols": ["get_automated_refund_refund_fees", "get_refund_transaction_fees", "get_refund_transaction_threshold", "is_refund_transaction_fees"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "coupon_validation",
+    "query": "coupon validation apply discount code on cart products",
+    "relevant_files": ["controllers/cart/validators/CouponValidation.py", "controllers/DiscountController.py"],
+    "relevant_symbols": ["apply_coupon", "CouponValidator.validate", "validation_factory"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "coupon_birthday",
+    "query": "birthday coupon auto apply restoration logic",
+    "relevant_files": ["libs/OrderHelper.py", "controllers/cart/initializers/MetaInitializers.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "auth_token",
+    "query": "JWT token decode user authentication middleware request",
+    "relevant_files": ["middleware/AuthHandler.py"],
+    "relevant_symbols": ["AuthHandler.process_request", "_validate_token_exists"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "auth_logout",
+    "query": "user logout session invalidation token revocation",
+    "relevant_files": ["controllers/AuthController.py", "middleware/AuthHandler.py"],
+    "relevant_symbols": ["invalidate_cached_user"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "checkout_stock",
+    "query": "checkout validation product out of stock quantity check",
+    "relevant_files": ["controllers/HyperlocalOnlineOrderController.py", "controllers/ExchangeOrderController.py"],
+    "relevant_symbols": ["validate_checkout"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "exchange_order",
+    "query": "exchange order placement product swap return",
+    "relevant_files": ["controllers/ExchangeOrderController.py"],
+    "relevant_symbols": ["ExchangeOrder.on_post", "validate_checkout", "exchange_order_payment_process"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "tss_money_credit",
+    "query": "TSS money wallet credit debit order placed cancelled",
+    "relevant_files": ["controllers/TssMoneyHistoryController.py"],
+    "relevant_symbols": ["orderPlacedTssMoney", "orderCancelTssMoney", "orderCancelTssMoneyProduct"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "tss_money_balance",
+    "query": "user TSS money balance history transaction",
+    "relevant_files": ["controllers/TssMoneyHistoryController.py"],
+    "relevant_symbols": ["userTSSMoney", "TssMoneyHistoryDetails.on_get"],
+    "query_type": "semantic"
+  },
+  {
+    "id": "shipment_tracking",
+    "query": "shipment tracking status update delivery webhook",
+    "relevant_files": ["controllers/SplitOrderController.py", "controllers/OrderController.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "automated_refund_status",
+    "query": "get_automated_refund_status_from_redis",
+    "relevant_files": ["utils/sync.py"],
+    "relevant_symbols": ["get_automated_refund_status_from_redis"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "initiate_refund_request",
+    "query": "initiate_refund_request",
+    "relevant_files": ["libs/RefundHelper.py"],
+    "relevant_symbols": ["initiate_refund_request"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "apply_coupon_symbol",
+    "query": "apply_coupon",
+    "relevant_files": ["controllers/cart/validators/CouponValidation.py"],
+    "relevant_symbols": ["apply_coupon"],
+    "query_type": "symbol"
+  },
+  {
+    "id": "product_stock",
+    "query": "product inventory stock size availability check",
+    "relevant_files": ["controllers/ProductsController.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "abandon_cart_notification",
+    "query": "abandoned cart push notification email reminder",
+    "relevant_files": ["controllers/AbandonCartController.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  },
+  {
+    "id": "order_model",
+    "query": "order data model structure fields database ORM",
+    "relevant_files": ["models/Order.py"],
+    "relevant_symbols": [],
+    "query_type": "semantic"
+  }
+]
