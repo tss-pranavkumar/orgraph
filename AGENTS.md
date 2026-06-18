@@ -2,7 +2,7 @@
 
 Authoritative agent guide for the orgraph codebase. Read this before making changes.
 
-## Current version: 0.1.29
+## Current version: 0.1.30
 
 ## What orgraph does
 
