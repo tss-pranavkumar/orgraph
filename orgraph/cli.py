@@ -445,6 +445,208 @@ def file_symbols(file_path: str, repo_path: str) -> None:
 
 
 @main.command()
+@click.argument("file_or_symbol")
+@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
+def context(file_or_symbol: str, repo_path: str) -> None:
+    """Show architectural context for a file path or symbol name.
+
+    Displays topology cluster, community, call depth, indegree, related files,
+    and community peers — useful before editing to understand blast radius.
+    """
+    from pathlib import Path as P
+    from orgraph.graph.kuzu import open_db_readonly
+    from orgraph.graph import query as gq
+    from orgraph.topology.serialise import load_communities, load_topology
+
+    repo = P(repo_path).resolve()
+    orgraph_dir = _orgraph_dir(repo)
+    db_path = orgraph_dir / "graph.kuzu"
+
+    if not db_path.exists():
+        console.print("[red]Not indexed. Run `orgraph index` first.[/]")
+        raise SystemExit(1)
+
+    topology = load_topology(orgraph_dir)
+    communities = load_communities(orgraph_dir)
+
+    uid_to_community: dict[str, int] = {}
+    if communities:
+        for cid, nodes in communities.items():
+            for u in nodes:
+                uid_to_community[u] = cid
+
+    cluster_by_id = {c.cluster_id: c for c in topology.clusters} if topology else {}
+
+    with open_db_readonly(db_path) as db:
+        file_path: str | None = None
+        uid: str | None = None
+
+        target = P(file_or_symbol)
+        if "/" in file_or_symbol or "\\" in file_or_symbol or "." in target.name:
+            candidate = target if target.is_absolute() else repo / file_or_symbol
+            if candidate.exists():
+                file_path = str(candidate.resolve())
+            else:
+                file_path = file_or_symbol
+        else:
+            rows = db.query_to_dicts(
+                "MATCH (f:Function) WHERE f.name = $name "
+                "RETURN f.path AS path, f.uid AS uid LIMIT 1",
+                {"name": file_or_symbol},
+            )
+            if not rows:
+                rows = db.query_to_dicts(
+                    "MATCH (c:Class) WHERE c.name = $name "
+                    "RETURN c.path AS path, c.uid AS uid LIMIT 1",
+                    {"name": file_or_symbol},
+                )
+            if rows:
+                file_path = rows[0]["path"]
+                uid = rows[0]["uid"]
+            else:
+                console.print(f"[red]Symbol or file '{file_or_symbol}' not found.[/]")
+                raise SystemExit(1)
+
+        if not topology or not file_path:
+            console.print("[red]No topology data. Re-run `orgraph index`.[/]")
+            raise SystemExit(1)
+
+        cluster_id = topology.file_cluster_id.get(file_path)
+        cluster = cluster_by_id.get(cluster_id) if cluster_id else None
+
+        community_id: int | None = None
+        if uid:
+            community_id = uid_to_community.get(uid)
+        if community_id is None:
+            rows = db.query_to_dicts(
+                "MATCH (f:Function) WHERE f.path = $path RETURN f.uid AS uid LIMIT 20",
+                {"path": file_path},
+            )
+            for row in rows:
+                cid = uid_to_community.get(row["uid"])
+                if cid is not None:
+                    community_id = cid
+                    break
+
+        indegree = (
+            gq.get_symbol_indegree(db, uid) if uid
+            else topology.file_indegree.get(file_path, 0)
+        )
+        call_depth = topology.file_call_depth.get(file_path)
+
+        repo_str = str(repo) + "/"
+        rel = file_path.replace(repo_str, "")
+        console.print(f"\n[bold cyan]context[/] [green]{rel}[/]\n")
+
+        info = Table(show_header=False, box=None, padding=(0, 2))
+        info.add_column("Key", style="dim")
+        info.add_column("Value", style="bold")
+        info.add_row("cluster", cluster_id or "—")
+        info.add_row("cluster files", str(len(cluster.all_files)) if cluster else "—")
+        info.add_row("foundational", "yes" if (cluster and cluster.is_foundational) else "no")
+        info.add_row("community", str(community_id) if community_id is not None else "—")
+        info.add_row("call depth", str(call_depth) if call_depth is not None else "—")
+        info.add_row("indegree", str(indegree))
+        console.print(info)
+
+        if cluster:
+            related = [f.replace(repo_str, "") for f in cluster.all_files[:10] if f != file_path]
+            if related:
+                console.print("\n[bold]Cluster files:[/]")
+                for f in related:
+                    console.print(f"  [dim]{f}[/]")
+
+        if community_id is not None and communities:
+            peers_raw: list[dict] = []
+            for peer_uid in communities.get(community_id, []):
+                if peer_uid == uid:
+                    continue
+                r = db.query_to_dicts(
+                    "MATCH (s:Function) WHERE s.uid = $uid "
+                    "RETURN s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
+                    {"uid": peer_uid},
+                ) or db.query_to_dicts(
+                    "MATCH (s:Class) WHERE s.uid = $uid "
+                    "RETURN s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
+                    {"uid": peer_uid},
+                )
+                if r and r[0].get("path") != file_path:
+                    peers_raw.append(r[0])
+                if len(peers_raw) >= 8:
+                    break
+            if peers_raw:
+                console.print("\n[bold]Community peers:[/]")
+                for p in peers_raw:
+                    console.print(
+                        f"  [cyan]{p['name']}[/]  "
+                        f"[dim]{p['path'].replace(repo_str, '')}:{p['line']}[/]"
+                    )
+
+
+@main.command("entry-points")
+@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
+@click.option("--kind", default="http", show_default=True,
+              type=click.Choice(["http", "tasks", "all"]),
+              help="Which entry points to show.")
+def entry_points(repo_path: str, kind: str) -> None:
+    """List HTTP handlers and async tasks detected in this repo."""
+    from orgraph.graph.kuzu import open_db_readonly
+    from orgraph.graph import query as gq
+    from orgraph.topology.serialise import load_topology
+
+    repo = Path(repo_path).resolve()
+    orgraph_dir = _orgraph_dir(repo)
+    db_path = orgraph_dir / "graph.kuzu"
+
+    if not db_path.exists():
+        console.print("[red]Not indexed. Run `orgraph index` first.[/]")
+        raise SystemExit(1)
+
+    topology = load_topology(orgraph_dir)
+    repo_str = str(repo) + "/"
+
+    with open_db_readonly(db_path) as db:
+        if kind in ("http", "all"):
+            handlers = gq.get_http_handlers(db)
+            if handlers:
+                table = Table(title="HTTP Handlers", show_header=True)
+                table.add_column("Method", style="bold yellow", width=6)
+                table.add_column("Symbol", style="cyan")
+                table.add_column("File", style="green")
+                table.add_column("Line", justify="right", style="bold")
+                for r in handlers:
+                    cluster_id = topology.file_cluster_id.get(r["path"]) if topology else ""
+                    rel = r["path"].replace(repo_str, "")
+                    table.add_row(
+                        r.get("http_method") or "—",
+                        r["name"],
+                        rel,
+                        str(r.get("line") or 0),
+                    )
+                console.print(table)
+            else:
+                console.print("[yellow]No HTTP handlers found.[/]")
+
+        if kind in ("tasks", "all"):
+            tasks = gq.get_celery_dispatches(db)
+            if tasks:
+                table = Table(title="Async Tasks", show_header=True)
+                table.add_column("Task", style="cyan")
+                table.add_column("File", style="green")
+                table.add_column("Dispatcher", style="dim")
+                for r in tasks:
+                    rel = (r.get("task_path") or "").replace(repo_str, "")
+                    table.add_row(
+                        r.get("task") or "—",
+                        rel,
+                        r.get("caller") or "—",
+                    )
+                console.print(table)
+            else:
+                console.print("[yellow]No async tasks found.[/]")
+
+
+@main.command()
 @click.argument("repo_path", default=None, required=False, type=click.Path(exists=False, file_okay=False))
 def serve(repo_path: str | None) -> None:
     """Start the MCP server (stdio transport).
