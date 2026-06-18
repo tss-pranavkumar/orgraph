@@ -73,3 +73,105 @@ def test_builder_can_query_files(tmp_path):
     assert any("auth" in n or "handler" in n or "model" in n for n in names), \
         f"Expected fixture files, got: {names}"
     db.close()
+
+
+# ── Regression tests: nodes/edges must actually *persist*, not just count. ──────
+# The builder swallows write errors (except Exception: pass), so a schema/param
+# mismatch silently drops data while ingest() still reports success. These assert
+# what reaches the graph. Input is the committed TS SCIP fixture (no binary needed),
+# which carries Class + CALLS + INHERITS — the shapes the older code dropped.
+
+TS_FIXTURE_DIR = (Path(__file__).parent / "fixtures" / "simple_typescript").resolve()
+TS_FIXTURE_SCIP = Path(__file__).parent / "fixtures" / "simple_typescript.scip"
+
+
+def _ingest_ts_fixture(tmp_path):
+    from orgraph.extract.scip import _parse_scip
+    from orgraph.graph.builder import GraphBuilder
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.schema import create_schema
+
+    result = _parse_scip(TS_FIXTURE_SCIP, TS_FIXTURE_DIR)
+    db = OrgraphDB(tmp_path / "graph.kuzu")
+    create_schema(db)
+    GraphBuilder(db=db, repo_path=TS_FIXTURE_DIR).ingest(result)
+    return db, result
+
+
+def test_builder_persists_class_nodes(tmp_path):
+    """Regression: _node_params always passes http_method, but the Class MERGE
+    doesn't reference it — Kuzu rejects unused params, so every Class (and
+    Interface/Struct/Enum/Variable) node write was silently dropped."""
+    db, _ = _ingest_ts_fixture(tmp_path)
+    classes = {r["name"] for r in db.query_to_dicts("MATCH (c:Class) RETURN c.name AS name")}
+    assert {"User", "Order", "AdminUser"} <= classes, classes
+    db.close()
+
+
+def test_builder_persists_interface_and_enum_nodes(tmp_path):
+    """Interface/Enum nodes (refined from SCIP docs) must persist with their real
+    label — not collapse into Class, and not get dropped at ingest."""
+    db, _ = _ingest_ts_fixture(tmp_path)
+    ifaces = {r["name"] for r in db.query_to_dicts("MATCH (i:Interface) RETURN i.name AS name")}
+    enums = {r["name"] for r in db.query_to_dicts("MATCH (e:Enum) RETURN e.name AS name")}
+    assert "Identifiable" in ifaces, ifaces
+    assert "Role" in enums, enums
+    db.close()
+
+
+def test_builder_persists_calls_and_inherits(tmp_path):
+    """Regression: INHERITS shipped without line_number while _write_edges always
+    SETs it -> every INHERITS edge dropped; CALLS likewise needs call_kind."""
+    db, _ = _ingest_ts_fixture(tmp_path)
+    calls = db.query_to_dicts("MATCH ()-[x:CALLS]->() RETURN count(x) AS c")[0]["c"]
+    assert calls > 0, "no CALLS edges persisted"
+    inh = db.query_to_dicts(
+        "MATCH (s:Class)-[:INHERITS]->(d:Class) RETURN s.name AS s, d.name AS d"
+    )
+    assert any(r["s"] == "AdminUser" and r["d"] == "User" for r in inh), inh
+    db.close()
+
+
+def test_builder_contains_links_every_symbol(tmp_path):
+    """Regression: _write_file_nodes skipped all but the first symbol per file,
+    so CONTAINS linked one symbol per file instead of all of them."""
+    db, result = _ingest_ts_fixture(tmp_path)
+    contains = db.query_to_dicts("MATCH (:File)-[x:CONTAINS]->() RETURN count(x) AS c")[0]["c"]
+    contained = ("Function", "Class", "Interface", "Enum", "Struct", "Variable")
+    symbols = sum(1 for n in result.nodes if n["label"] in contained)
+    assert contains == symbols, f"{contains} CONTAINS edges for {symbols} symbols"
+    db.close()
+
+
+def test_schema_migrates_legacy_db(tmp_path):
+    """Regression: a graph built by an older schema (CALLS without call_kind,
+    INHERITS without line_number) must gain those columns via create_schema so
+    that edge writes setting them no longer fail."""
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.schema import create_schema
+
+    db = OrgraphDB(tmp_path / "legacy.kuzu")
+    # Simulate the legacy schema (pre-call_kind / pre-line_number).
+    db.execute("CREATE NODE TABLE Function(uid STRING, PRIMARY KEY(uid))")
+    db.execute("CREATE NODE TABLE Class(uid STRING, PRIMARY KEY(uid))")
+    db.execute("CREATE REL TABLE CALLS(FROM Function TO Function, line_number INT64, confidence STRING)")
+    db.execute("CREATE REL TABLE INHERITS(FROM Class TO Class, confidence STRING)")
+
+    create_schema(db)  # must ALTER in the missing columns
+
+    # Writes that SET the migrated columns must now succeed.
+    db.execute("MERGE (:Function {uid: 'a'})")
+    db.execute("MERGE (:Function {uid: 'b'})")
+    db.execute(
+        "MATCH (s:Function {uid:'a'}), (d:Function {uid:'b'}) "
+        "MERGE (s)-[r:CALLS]->(d) SET r.call_kind = 'local'"
+    )
+    db.execute("MERGE (:Class {uid: 'x'})")
+    db.execute("MERGE (:Class {uid: 'y'})")
+    db.execute(
+        "MATCH (s:Class {uid:'x'}), (d:Class {uid:'y'}) "
+        "MERGE (s)-[r:INHERITS]->(d) SET r.line_number = 1"
+    )
+    assert db.query_to_dicts("MATCH ()-[x:CALLS]->() RETURN count(x) AS c")[0]["c"] == 1
+    assert db.query_to_dicts("MATCH ()-[x:INHERITS]->() RETURN count(x) AS c")[0]["c"] == 1
+    db.close()

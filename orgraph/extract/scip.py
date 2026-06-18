@@ -148,11 +148,12 @@ def _name_from_symbol(symbol: str) -> str:
 
 
 def _label_from_symbol(symbol: str) -> str | None:
-    """Map a SCIP symbol descriptor suffix to an orgraph node label.
+    """Map a SCIP symbol descriptor suffix to a *coarse* orgraph node label.
 
-    Returns 'Function' (functions + methods) or 'Class' (types), or None to skip
-    (namespaces, parameters, plain terms/variables) — keeping parity with the
-    tree-sitter extractor, which emits only Function and Class nodes.
+    Returns 'Function' (functions + methods) or 'Type' (any class/interface/enum/
+    struct — the descriptor `#` suffix can't tell them apart), or None to skip
+    (namespaces, parameters, plain terms/variables). Callers refine 'Type' into
+    Class/Interface/Enum/Struct via `_refine_type_label` using the symbol's doc.
     """
     s = symbol.rstrip()
     if s.endswith("/"):            # namespace / module
@@ -160,10 +161,43 @@ def _label_from_symbol(symbol: str) -> str | None:
     if s.endswith("()."):          # function or method
         return "Function"
     if s.endswith("#"):            # type: class/struct/interface/enum
-        return "Class"
+        return "Type"
     if "#" in s and re.search(r"\([0-9a-fA-F]{4,}\)\.$", s):   # overloaded method
         return "Function"
     return None
+
+
+# SCIP descriptors use the same `#` suffix for every type (class, interface, enum,
+# struct, type alias), so the descriptor alone can't distinguish them. Both
+# scip-python and scip-typescript DO record the real keyword in
+# SymbolInformation.documentation, e.g. "```ts\ninterface Foo\n```" — decode that.
+_TYPE_KW_RE = re.compile(
+    r"```[a-z]*\s*(?:export\s+|declare\s+|default\s+|abstract\s+|const\s+)*"
+    r"(class|interface|enum|struct|trait|type|namespace)\b"
+)
+_TYPE_KW_LABEL: dict[str, str | None] = {
+    "class": "Class",
+    "interface": "Interface",
+    "trait": "Interface",
+    "enum": "Enum",
+    "struct": "Struct",
+    "type": None,        # bare type aliases aren't structural nodes — skip
+    "namespace": None,   # namespaces aren't symbols we model
+}
+
+
+def _refine_type_label(documentation) -> str | None:
+    """Resolve a `#`-type symbol to Class/Interface/Enum/Struct from its hover doc.
+
+    Returns the precise label, None to skip (type alias / namespace), or 'Class'
+    as a safe fallback when no keyword is present (descriptor is a type, kind
+    unknown — matches the old coarse behaviour rather than dropping the node).
+    """
+    for text in documentation:
+        m = _TYPE_KW_RE.search(text)
+        if m:
+            return _TYPE_KW_LABEL.get(m.group(1), "Class")
+    return "Class"
 
 
 def _is_definition(occ) -> bool:
@@ -212,12 +246,17 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
 
     # INHERITS relationships still come from SymbolInformation (kind/display_name
     # are empty there, but is_implementation relationships are populated).
+    # SymbolInformation.documentation carries the real type keyword, so it's also
+    # where we learn class-vs-interface-vs-enum (the descriptor can't say).
     bases: dict[str, list[str]] = {}
+    type_label: dict[str, str | None] = {}   # scip symbol → Class/Interface/Enum/Struct (or None)
     for doc in index.documents:
         for si in doc.symbols:
             b = [r.symbol for r in si.relationships if getattr(r, "is_implementation", False)]
             if b:
                 bases[si.symbol] = b
+            if si.symbol.endswith("#"):
+                type_label[si.symbol] = _refine_type_label(si.documentation)
 
     nodes: list[NodeDict] = []
     uid_map: dict[str, str] = {}     # scip symbol → uid
@@ -237,6 +276,12 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             label = _label_from_symbol(sym)
             if label is None:
                 continue
+            if label == "Type":
+                # refine class/interface/enum/struct from the symbol's hover doc;
+                # None means a type alias / namespace we don't model as a node.
+                label = type_label.get(sym, "Class")
+                if label is None:
+                    continue
             line_no = (occ.range[0] + 1) if occ.range else 0
             name = _name_from_symbol(sym)
 

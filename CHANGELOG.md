@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.30 - 2026-06-18
+
+Make the SCIP-backed graph actually accurate, end-to-end, for both Python and
+TypeScript. Found by running a full index of a real TS repo and a real Python
+repo and checking what reached the persisted graph (not what `ingest()` claimed).
+
+### Fixed
+- **Graph build silently dropped Class nodes, INHERITS, and (on old DBs) all CALLS.**
+  `GraphBuilder` wraps every write in `except Exception: pass`, so several schema/param
+  mismatches lost data while `ingest()` still reported success — a real TS repo extracted
+  502 nodes / 546 edges but persisted 342 nodes / 0 edges. These bugs were language-agnostic,
+  so Python graphs had been losing Class nodes + INHERITS too. Four fixes:
+  - Kuzu rejects *unused* query params; the Class/Interface/Struct/Enum/Variable MERGE
+    templates don't reference `http_method`/`http_path`, so every non-Function node write
+    threw. Added `_used_params()` to pass only the placeholders a query references.
+  - `INHERITS` rel table had no `line_number` column while `_write_edges` always sets it —
+    every INHERITS edge was dropped. Added the column.
+  - Old `.orgraph/graph.kuzu` DBs built before `call_kind` existed silently rejected every
+    CALLS write (`CREATE ... IF NOT EXISTS` never alters an existing table). Added idempotent
+    `ALTER TABLE` migrations in `schema.py` (`_MIGRATIONS`).
+  - `CONTAINS` linked only the first symbol per file (`if path in seen: continue` skipped the
+    rest); now links every symbol.
+- **SCIP mislabeled every interface/enum/type alias as `Class`.** Descriptors use the same `#`
+  suffix for all types, so `_label_from_symbol` couldn't tell them apart (a real TS repo showed
+  a bogus "160 Class" that was really 21 class + 125 interface + 14 type alias). It now returns a
+  coarse `Type` that `_refine_type_label` resolves to the real `Class`/`Interface`/`Enum`/`Struct`
+  by reading the declaration keyword from `SymbolInformation.documentation` (the `kind` field is
+  left unset by both indexers); bare `type` aliases are skipped rather than mislabeled. Verified:
+  backend reports Class 21 / Interface 125, matching the source.
+- `graph/query.py` symbol resolution (`resolve_symbol`, `lookup_symbol_by_uid`,
+  `list_file_symbols`) now searches Interface/Enum/Struct too, via a shared `_SYMBOL_KINDS`,
+  so `context`/`trace`/`file` find them. `CONTAINS` schema + builder now link `File → Interface`.
+
+### Added
+- **SCIP verified language-agnostic.** `tests/fixtures/simple_typescript[.scip]` plus TypeScript
+  parser tests confirm the descriptor decoder, enclosing-range call graph, and `extends`→INHERITS
+  work on `scip-typescript` (only the install hint and `--cwd` build branch were Python-specific).
+- Regression tests in `tests/test_graph.py` assert Class/Interface/Enum nodes, CALLS, INHERITS,
+  per-symbol CONTAINS, and legacy-DB migration all persist (querying stored counts, not the
+  `ingest()` return value that masked the original bugs).
+
 ## 0.1.29 - 2026-06-18
 
 ### Changed

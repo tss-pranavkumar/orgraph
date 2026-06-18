@@ -1,10 +1,20 @@
 """Ingests an ExtractionResult into the Kuzu graph."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from orgraph.extract.types import ExtractionResult, make_uid
+from orgraph.extract.types import ExtractionResult
 from orgraph.graph.kuzu import OrgraphDB
+
+_PARAM_RE = re.compile(r"\$(\w+)")
+
+
+def _used_params(cypher: str, params: dict) -> dict:
+    """Keep only the params a query references. Kuzu raises on any *unused* param,
+    so e.g. the Class MERGE (which has no http_method) must not be handed one."""
+    wanted = set(_PARAM_RE.findall(cypher))
+    return {k: v for k, v in params.items() if k in wanted}
 
 # Node labels that have line_number-based primary keys
 _SYMBOL_LABELS = frozenset({"Function", "Class", "Interface", "Struct", "Enum", "Variable", "Module"})
@@ -158,7 +168,7 @@ class GraphBuilder:
             if not cypher:
                 continue
             try:
-                self.db.execute(cypher, _node_params(node))
+                self.db.execute(cypher, _used_params(cypher, _node_params(node)))
                 count += 1
             except Exception:
                 pass  # skip duplicate or schema mismatch
@@ -171,25 +181,35 @@ class GraphBuilder:
 
         for node in result.nodes:
             path_str = node.get("path", "")
-            if not path_str or path_str in seen_files:
+            if not path_str:
                 continue
-            seen_files.add(path_str)
             p = Path(path_str)
-            rel = str(p.relative_to(self.repo_path)) if p.is_relative_to(self.repo_path) else p.name
-            lang = node.get("lang", "")
-            uid_file = make_uid(p.name, path_str, 0)
-            try:
-                self.db.execute(_MERGE_FILE, {
-                    "path": path_str, "name": p.name,
-                    "relative_path": rel, "lang": lang,
-                })
-            except Exception:
-                pass
 
-            # CONTAINS: File → symbol
+            # File + Directory nodes: once per unique path.
+            if path_str not in seen_files:
+                seen_files.add(path_str)
+                rel = str(p.relative_to(self.repo_path)) if p.is_relative_to(self.repo_path) else p.name
+                lang = node.get("lang", "")
+                try:
+                    self.db.execute(_MERGE_FILE, {
+                        "path": path_str, "name": p.name,
+                        "relative_path": rel, "lang": lang,
+                    })
+                except Exception:
+                    pass
+
+                dir_path = str(p.parent)
+                if dir_path not in seen_dirs:
+                    seen_dirs.add(dir_path)
+                    try:
+                        self.db.execute(_MERGE_DIR, {"path": dir_path, "name": p.parent.name})
+                    except Exception:
+                        pass
+
+            # CONTAINS: File → symbol, for *every* symbol in the file (not just the first).
             if node.get("uid"):
                 sym_label = node.get("label", "Function")
-                if sym_label in ("Function", "Class", "Enum", "Struct", "Variable"):
+                if sym_label in ("Function", "Class", "Interface", "Enum", "Struct", "Variable"):
                     try:
                         cypher = (
                             f"MATCH (f:File {{path: $fp}}), (s:{sym_label} {{uid: $uid}}) "
@@ -198,15 +218,6 @@ class GraphBuilder:
                         self.db.execute(cypher, {"fp": path_str, "uid": node["uid"]})
                     except Exception:
                         pass
-
-            # Directory
-            dir_path = str(p.parent)
-            if dir_path not in seen_dirs:
-                seen_dirs.add(dir_path)
-                try:
-                    self.db.execute(_MERGE_DIR, {"path": dir_path, "name": p.parent.name})
-                except Exception:
-                    pass
 
     def _write_edges(self, result: ExtractionResult) -> int:
         count = 0
