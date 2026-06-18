@@ -393,7 +393,7 @@ def who_calls(symbol: str, repo_path: str, depth: int) -> None:
             table.add_row(c["name"], rel_path, str(call_line))
 
     console.print(table)
-    console.print(f"\n[dim]{len(all_callers)} caller(s) found[/]")
+    console.print(f"\n[dim]Changing [cyan]{target['name']}[/] may affect all {len(all_callers)} of the above.[/]")
 
 
 @main.command()
@@ -460,16 +460,29 @@ def trace(symbol: str, repo_path: str, depth: int, direction: str) -> None:
         return
 
     repo_str = str(repo) + "/"
+
+    # Track siblings per parent so we can use └─ for the last one and ├─ for the rest
+    from collections import defaultdict
+    siblings_at: dict = defaultdict(list)
     for entry in chain:
-        indent = "  " * entry["depth"]
+        parent_sym = entry.get("from_symbol") if direction == "callees" else entry.get("to_symbol")
+        siblings_at[(entry["depth"] - 1, parent_sym)].append(entry)
+
+    for entry in chain:
+        d = entry["depth"]
         name = entry["to_symbol"] if direction == "callees" else entry["from_symbol"]
         path = entry["to_file"] if direction == "callees" else entry["from_file"]
         line = entry["to_line"] if direction == "callees" else entry["from_line"]
         rel_path = path.replace(repo_str, "") if path else ""
         kind_tag = f" [magenta][{entry['call_kind']}][/]" if entry.get("call_kind") and entry["call_kind"] != "local" else ""
-        console.print(f"{indent}[cyan]{name}[/]{kind_tag}  [dim]{rel_path}:{line}[/]")
 
-    console.print(f"\n[dim]{len(chain)} edge(s), depth={depth}[/]")
+        parent_sym = entry.get("from_symbol") if direction == "callees" else entry.get("to_symbol")
+        siblings = siblings_at[(d - 1, parent_sym)]
+        connector = "└─ " if entry is siblings[-1] else "├─ "
+        prefix = "  " * (d - 1)
+        console.print(f"{prefix}[dim]{connector}[/][cyan]{name}[/]{kind_tag}  [dim]{rel_path}:{line}[/]")
+
+    console.print(f"\n[dim]{len(chain)} call(s) traced, depth={depth}[/]")
 
 
 @main.command("file")
@@ -639,20 +652,36 @@ def context(file_or_symbol: str, repo_path: str) -> None:
         info = Table(show_header=False, box=None, padding=(0, 2))
         info.add_column("Key", style="dim")
         info.add_column("Value", style="bold")
-        info.add_row("cluster", cluster_id or "—")
-        info.add_row("cluster files", str(len(cluster.all_files)) if cluster else "—")
-        info.add_row("foundational", "yes" if (cluster and cluster.is_foundational) else "no")
-        info.add_row("community", str(community_id) if community_id is not None else "—")
-        info.add_row("call depth", str(call_depth) if call_depth is not None else "—")
-        info.add_row("indegree", str(indegree))
+        info.add_column("Meaning", style="dim italic")
+
+        depth_note = (
+            "entry point — nothing calls this from above" if call_depth == 0
+            else f"{call_depth} layer(s) below entry points" if call_depth is not None
+            else "—"
+        )
+        indegree_note = (
+            "not called by anything indexed" if indegree == 0
+            else f"{indegree} function(s) call this directly"
+        )
+        foundational = cluster and cluster.is_foundational
+        foundational_note = "many things depend on it — change carefully" if foundational else ""
+        cluster_size = len(cluster.all_files) if cluster else 0
+        cluster_note = f"{cluster_size} tightly coupled file(s) — changes here may ripple" if cluster_size > 1 else ""
+
+        if call_depth is not None:
+            info.add_row("call depth", str(call_depth), depth_note)
+        info.add_row("indegree", str(indegree), indegree_note)
+        info.add_row("foundational", "yes" if foundational else "no", foundational_note)
+        if cluster_size:
+            info.add_row("coupled files", str(cluster_size), cluster_note)
         console.print(info)
 
         if cluster:
             related = [f.replace(repo_str, "") for f in cluster.all_files[:10] if f != file_path]
             if related:
-                console.print("\n[bold]Cluster files:[/]")
+                console.print("\n[bold]Files that move with this one:[/]")
                 for f in related:
-                    console.print(f"  [dim]{f}[/]")
+                    console.print(f"  [dim]├─ {f}[/]")
 
         if community_id is not None and communities:
             peers_raw: list[dict] = []
@@ -743,27 +772,34 @@ def deps(file_path: str, repo_path: str, direction: str, depth: int) -> None:
         console.print(f"[yellow]No {'imports' if direction == 'imports' else 'dependents'} found.[/]")
         return
 
-    arrow = "imports →" if direction == "imports" else "← imported by"
     rel = abs_path.replace(repo_str, "")
-    console.print(f"\n[bold cyan]{arrow}[/] [green]{rel}[/]\n")
+    has_alias = any(d.get("alias") for d in result)
+    has_transitive = any(d.get("transitive") for d in result)
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Name", style="cyan")
-    table.add_column("Path", style="green")
-    table.add_column("Alias", style="dim")
-    table.add_column("Transitive", justify="center", style="dim")
+    if direction == "imports":
+        console.print(f"\n[green]{rel}[/] [dim]imports:[/]\n")
+    else:
+        console.print(f"\n[dim]imported by[/] [green]{rel}[/][dim]:[/]\n")
 
-    for d in result:
+    direct = [d for d in result if not d.get("transitive")]
+    transitive = [d for d in result if d.get("transitive")]
+
+    for d in direct:
         path = (d.get("path") or "").replace(repo_str, "")
-        table.add_row(
-            d.get("name") or "—",
-            path or "—",
-            d.get("alias") or "",
-            "yes" if d.get("transitive") else "",
-        )
+        alias = f"  [dim]as {d['alias']}[/]" if d.get("alias") else ""
+        connector = "└─ " if d is direct[-1] and not transitive else "├─ "
+        console.print(f"  [dim]{connector}[/][cyan]{path or d.get('name') or '—'}[/]{alias}")
 
-    console.print(table)
-    console.print(f"\n[dim]{len(result)} dep(s), direction={direction}, depth={depth}[/]")
+    if transitive:
+        console.print(f"  [dim]  (transitive — via depth {depth})[/]")
+        for d in transitive:
+            path = (d.get("path") or "").replace(repo_str, "")
+            connector = "└─ " if d is transitive[-1] else "├─ "
+            console.print(f"    [dim]{connector}{path or d.get('name') or '—'}[/]")
+
+    total = len(result)
+    kind = "direct" if not has_transitive else f"{len(direct)} direct, {len(transitive)} transitive"
+    console.print(f"\n[dim]{total} dep(s) — {kind}[/]")
 
 
 @main.command("entry-points")
