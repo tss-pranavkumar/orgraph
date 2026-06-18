@@ -583,6 +583,61 @@ def context(file_or_symbol: str, repo_path: str) -> None:
                     )
 
 
+@main.command()
+@click.argument("file_path")
+@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
+@click.option("--direction", default="imports", show_default=True,
+              type=click.Choice(["imports", "imported_by"]),
+              help="imports: what this file depends on. imported_by: what depends on it.")
+@click.option("--depth", default=1, show_default=True, help="How many hops to traverse (max 3).")
+def deps(file_path: str, repo_path: str, direction: str, depth: int) -> None:
+    """Show the import/dependency tree for a file."""
+    from orgraph.graph.kuzu import open_db_readonly
+    from orgraph.graph import query as gq
+
+    repo = Path(repo_path).resolve()
+    db_path = _orgraph_dir(repo) / "graph.kuzu"
+    if not db_path.exists():
+        console.print("[red]Not indexed. Run `orgraph index` first.[/]")
+        raise SystemExit(1)
+
+    repo_str = str(repo) + "/"
+
+    with open_db_readonly(db_path) as db:
+        abs_path = gq.resolve_file_path(db, file_path, repo)
+        if not abs_path:
+            console.print(f"[red]File '{file_path}' not found in index.[/]")
+            raise SystemExit(1)
+
+        result = gq.get_dependencies(db, abs_path, direction, min(depth, 3))
+
+    if not result:
+        console.print(f"[yellow]No {'imports' if direction == 'imports' else 'dependents'} found.[/]")
+        return
+
+    arrow = "imports →" if direction == "imports" else "← imported by"
+    rel = abs_path.replace(repo_str, "")
+    console.print(f"\n[bold cyan]{arrow}[/] [green]{rel}[/]\n")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("Path", style="green")
+    table.add_column("Alias", style="dim")
+    table.add_column("Transitive", justify="center", style="dim")
+
+    for d in result:
+        path = (d.get("path") or "").replace(repo_str, "")
+        table.add_row(
+            d.get("name") or "—",
+            path or "—",
+            d.get("alias") or "",
+            "yes" if d.get("transitive") else "",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]{len(result)} dep(s), direction={direction}, depth={depth}[/]")
+
+
 @main.command("entry-points")
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
 @click.option("--kind", default="http", show_default=True,
