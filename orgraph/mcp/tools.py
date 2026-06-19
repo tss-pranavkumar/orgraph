@@ -594,7 +594,68 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
             "truncated": len(deps) >= 100,
         }
 
-    # ── Tool 6: reindex ─────────────────────────────────────────────────────
+    # ── Tool 6: find_path ───────────────────────────────────────────────────
+
+    @mcp.tool()
+    def find_path(
+        from_symbol: str,
+        to_symbol: str,
+        repo: str = "",
+        max_hops: int = 15,
+    ) -> dict[str, Any]:
+        """Find the shortest call path between two symbols.
+
+        Returns an ordered list of hops from from_symbol to to_symbol via CALLS edges.
+        Useful for tracing how an entry point reaches a deep utility, or confirming
+        two functions are connected at all.
+
+        from_symbol: name of the starting function or class.
+        to_symbol: name of the target function or class.
+        max_hops: maximum hops to search (default 15; cap at 20).
+        Pass `repo` as the absolute path to the project.
+        """
+        from orgraph.graph import query as gq
+
+        state = _get_state(repo)
+        if state is None:
+            return _no_repo_error(repo)
+        if state.db is None:
+            return _LOADING
+
+        max_hops = min(max_hops, 20)
+
+        from_roots = gq.resolve_symbol(state.db, from_symbol)
+        to_roots = gq.resolve_symbol(state.db, to_symbol)
+
+        if not from_roots:
+            return {"found": False, "error": f"Symbol '{from_symbol}' not found in index."}
+        if not to_roots:
+            return {"found": False, "error": f"Symbol '{to_symbol}' not found in index."}
+
+        from_node = from_roots[0]
+        to_node = to_roots[0]
+        path = gq.find_path(state.db, from_node["uid"], to_node["uid"], max_hops)
+
+        if path is None:
+            return {
+                "found": False,
+                "from": from_node["name"],
+                "to": to_node["name"],
+                "message": f"No path found within {max_hops} hops.",
+            }
+
+        return {
+            "found": True,
+            "from": from_node["name"],
+            "to": to_node["name"],
+            "hops": len(path) - 1,
+            "path": [
+                {"name": s["name"], "file": s["path"], "line": s["line"]}
+                for s in path
+            ],
+        }
+
+    # ── Tool 7: reindex ─────────────────────────────────────────────────────
 
     @mcp.tool()
     def reindex(repo: str = "", force: bool = False) -> dict[str, Any]:
@@ -663,5 +724,6 @@ def register_tools(mcp, startup_repo: Path | None = None) -> dict[str, Any]:
         "list_symbols": list_symbols,
         "find_entry_points": find_entry_points,
         "get_dependencies": get_dependencies,
+        "find_path": find_path,
         "reindex": reindex,
     }

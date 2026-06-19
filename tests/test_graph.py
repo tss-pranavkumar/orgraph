@@ -175,3 +175,76 @@ def test_schema_migrates_legacy_db(tmp_path):
     assert db.query_to_dicts("MATCH ()-[x:CALLS]->() RETURN count(x) AS c")[0]["c"] == 1
     assert db.query_to_dicts("MATCH ()-[x:INHERITS]->() RETURN count(x) AS c")[0]["c"] == 1
     db.close()
+
+
+# ── Phase B: data-loss regression guards ──────────────────────────────────────
+
+def _ingest_fixture(tmp_path):
+    """Ingest the simple_python fixture and return (db, builder)."""
+    from orgraph.extract.treesitter import TreeSitterExtractor
+    from orgraph.graph.builder import GraphBuilder
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.schema import create_schema
+
+    result = TreeSitterExtractor(FIXTURE).run()
+    db = OrgraphDB(tmp_path / "graph.kuzu")
+    create_schema(db)
+    builder = GraphBuilder(db=db, repo_path=FIXTURE)
+    builder.clear()
+    builder.ingest(result)
+    return db, builder
+
+
+def test_imports_persist_file_to_file(tmp_path):
+    """IMPORTS edges survive the write (regression: confidence-column crash + bad endpoints)."""
+    db, _ = _ingest_fixture(tmp_path)
+    rows = db.query_to_dicts("MATCH (s:File)-[:IMPORTS]->(d:File) RETURN s.name AS s, d.name AS d")
+    assert rows, "Expected at least one File->File IMPORTS edge"
+    pairs = {(r["s"], r["d"]) for r in rows}
+    assert ("handlers.py", "auth.py") in pairs, f"missing known import; got {pairs}"
+    for r in rows:
+        assert r["s"] != r["d"], "self-import should be dropped"
+    db.close()
+
+
+def test_deps_returns_imports(tmp_path):
+    """get_dependencies('imports') returns rows now that IMPORTS persists."""
+    from orgraph.graph.query import get_dependencies
+    db, _ = _ingest_fixture(tmp_path)
+    handlers = db.query_to_dicts("MATCH (f:File) WHERE f.name = 'handlers.py' RETURN f.path AS p")[0]["p"]
+    deps = get_dependencies(db, handlers, "imports", 1)
+    names = {d["name"] for d in deps}
+    assert {"auth.py", "models.py"} <= names, f"expected imported files, got {names}"
+    db.close()
+
+
+def test_no_whole_relation_silent_drop(tmp_path):
+    """Every extracted relation persists at least one edge; no schema-error drops."""
+    _, builder = _ingest_fixture(tmp_path)
+    s = builder.last_ingest_summary
+    for rel, n in s["extracted"].items():
+        if n > 0:
+            assert s["persisted"].get(rel, 0) > 0, f"relation {rel} fully dropped: {s}"
+    schema_errors = {k: v for k, v in s["drops"].items() if k.endswith(":schema-error")}
+    assert not schema_errors, f"schema-error drops indicate a column/table bug: {schema_errors}"
+
+
+def test_calls_persist_without_schema_error(tmp_path):
+    """CALLS must never drop to a schema error, and the bulk must persist.
+
+    (A small number of edges legitimately drop as external/unresolved — calls to
+    stdlib/3rd-party symbols, or graphify duplicate-name artifacts — so we assert
+    the bulk persists rather than an exact count.)
+    """
+    _, builder = _ingest_fixture(tmp_path)
+    s = builder.last_ingest_summary
+    assert s["drops"].get("CALLS:schema-error", 0) == 0, f"CALLS hit a schema error: {s['drops']}"
+    extracted = s["extracted"].get("CALLS", 0)
+    persisted = s["persisted"].get("CALLS", 0)
+    assert persisted >= extracted - 2, f"too many CALLS lost: {persisted}/{extracted} ({s['drops']})"
+
+
+def test_imports_relation_has_no_confidence_column():
+    """White-box guard for the original IMPORTS crash: never SET a column it lacks."""
+    from orgraph.graph.builder import _EDGE_COLUMNS
+    assert "confidence" not in _EDGE_COLUMNS["IMPORTS"]

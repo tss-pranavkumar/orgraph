@@ -41,6 +41,13 @@ _FALCON_HTTP: dict[str, str] = {
 
 _IGNORED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"})
 
+# scip-python / scip-typescript do NOT set the SCIP Import symbol-role on import
+# occurrences (verified: only Definition + Read/plain-reference roles appear), so
+# imports are detected by the source line a reference sits on. Covers Python
+# (`import x` / `from x import y`) and TS/JS (`import ... from '...'`,
+# `export ... from '...'`, `require(...)`).
+_IMPORT_LINE_RE = re.compile(r"^\s*(from\s|import\s)|\bfrom\s+['\"]|require\s*\(")
+
 
 def _detect_primary_lang(repo_path: Path) -> str | None:
     counts: dict[str, int] = {}
@@ -124,7 +131,23 @@ class ScipExtractor:
         except Exception:
             return None
 
-        return _parse_scip(out_file, self.repo_path)
+        result = _parse_scip(out_file, self.repo_path)
+
+        # Detect silent failure: scip-<lang> exits 0 and writes a valid index
+        # header but emits zero documents (Pyright environment-resolution failure
+        # is the main cause for scip-python). An empty result is worse than
+        # tree-sitter — fall back rather than silently returning an empty graph.
+        if not result or not result.nodes:
+            import sys
+            print(
+                f"orgraph: {binary} produced 0 nodes for {self.repo_path.name} "
+                "(index has no documents — likely an environment-resolution failure). "
+                "Falling back to tree-sitter.",
+                file=sys.stderr,
+            )
+            return None
+
+        return result
 
 
 # ── SCIP symbol descriptor decoding ───────────────────────────────────────────
@@ -261,6 +284,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     nodes: list[NodeDict] = []
     uid_map: dict[str, str] = {}     # scip symbol → uid
     label_of: dict[str, str] = {}    # scip symbol → label
+    sym_def_path: dict[str, str] = {}   # scip symbol → defining file abs path (any defined symbol)
 
     # ── Pass 1: definitions → nodes ────────────────────────────────────────────
     for doc in index.documents:
@@ -273,6 +297,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             sym = occ.symbol
             if sym.startswith("local ") or not _is_definition(occ):
                 continue
+            sym_def_path.setdefault(sym, abs_path)   # record before the node-label filter
             label = _label_from_symbol(sym)
             if label is None:
                 continue
@@ -328,7 +353,13 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
                 continue
             row = r[0]
             col_end = r[3] if len(r) >= 4 else (r[2] if len(r) >= 3 else (r[1] if len(r) > 1 else 0))
-            if row >= len(src) or not src[row][col_end:].lstrip().startswith("("):
+            if row >= len(src):
+                continue
+            line = src[row]
+            col_start = r[1] if len(r) > 1 else 0
+            if "#" in line[:col_start]:
+                continue  # reference sits after a '#' on its line → commented-out code
+            if not line[col_end:].lstrip().startswith("("):
                 continue  # reference not followed by '(' → not a call site
             ref_line = row + 1
             caller_sym = _find_enclosing_symbol(ref_line, def_occs)
@@ -356,6 +387,39 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
                     "source_uid": src_uid, "target_uid": dst_uid,
                     "relation": "INHERITS", "confidence": "EXTRACTED", "line_number": 0,
                 })
+
+    # ── Pass 4: imports → File→File edges (import-line heuristic) ──────────────
+    # A reference occurrence sitting on an import line whose symbol is defined in
+    # another file is a file-level dependency. Deduped to one edge per file pair —
+    # the same File→File model the tree-sitter path and `deps` use.
+    import_seen: set[tuple[str, str]] = set()
+    for doc in index.documents:
+        abs_path = str(repo_path / doc.relative_path)
+        src = _read_lines(repo_path / doc.relative_path)
+        if not src:
+            continue
+        for occ in doc.occurrences:
+            sym = occ.symbol
+            if sym.startswith("local ") or _is_definition(occ):
+                continue
+            r = list(occ.range)
+            if not r:
+                continue
+            row = r[0]
+            if row >= len(src) or not _IMPORT_LINE_RE.search(src[row]):
+                continue
+            dst_path = sym_def_path.get(sym)
+            if not dst_path or dst_path == abs_path:
+                continue
+            key = (abs_path, dst_path)
+            if key in import_seen:
+                continue
+            import_seen.add(key)
+            edges.append({
+                "source_uid": "", "target_uid": "", "relation": "IMPORTS",
+                "confidence": "EXTRACTED", "line_number": row + 1,
+                "src_path": abs_path, "dst_path": dst_path, "alias": "",
+            })
 
     # Celery dispatch parity (reuse tree-sitter heuristic over the SCIP nodes).
     edges.extend(ts._extract_celery_dispatch_edges(nodes))

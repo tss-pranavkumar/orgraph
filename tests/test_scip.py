@@ -53,6 +53,8 @@ def test_node_paths_are_absolute(scip_result):
 def test_edges_reference_real_node_uids(scip_result):
     uids = {n["uid"] for n in scip_result.nodes}
     for e in scip_result.edges:
+        if e.get("relation") == "IMPORTS":
+            continue  # IMPORTS is File→File, keyed by src_path/dst_path, not uid
         assert e["source_uid"] in uids
         assert e["target_uid"] in uids
 
@@ -130,6 +132,8 @@ def test_ts_nodes_are_typescript_and_absolute(ts_scip_result):
 def test_ts_edges_reference_real_node_uids(ts_scip_result):
     uids = {n["uid"] for n in ts_scip_result.nodes}
     for e in ts_scip_result.edges:
+        if e.get("relation") == "IMPORTS":
+            continue  # IMPORTS is File→File, keyed by src_path/dst_path, not uid
         assert e["source_uid"] in uids
         assert e["target_uid"] in uids
 
@@ -201,3 +205,31 @@ def test_scip_extractor_end_to_end_typescript(tmp_path):
     result = ScipExtractor(repo_path=target, scratch_dir=target / ".scip").run()
     assert result is not None and result.extractor == "scip"
     assert any(n["lang"] == "typescript" for n in result.nodes)
+
+
+def test_scip_emits_file_to_file_imports(scip_result):
+    """SCIP path now produces File->File IMPORTS edges (import-line heuristic)."""
+    imports = [e for e in scip_result.edges if e.get("relation") == "IMPORTS"]
+    assert imports, "expected IMPORTS edges from the SCIP fixture"
+    pairs = {(Path(e["src_path"]).name, Path(e["dst_path"]).name) for e in imports}
+    assert ("handlers.py", "auth.py") in pairs, f"missing known import; got {pairs}"
+    assert ("handlers.py", "models.py") in pairs, f"missing known import; got {pairs}"
+    for e in imports:
+        assert e["src_path"] != e["dst_path"], "self-import should be excluded"
+        assert e.get("source_uid") == "" and e.get("target_uid") == "", "IMPORTS is path-keyed"
+
+
+def test_scip_imports_persist_end_to_end(scip_result, tmp_path):
+    """SCIP IMPORTS edges survive ingest into Kuzu as File->File."""
+    from orgraph.graph.builder import GraphBuilder
+    from orgraph.graph.kuzu import OrgraphDB
+    from orgraph.graph.schema import create_schema
+
+    db = OrgraphDB(tmp_path / "graph.kuzu")
+    create_schema(db)
+    b = GraphBuilder(db=db, repo_path=FIXTURE_DIR)
+    b.clear()
+    b.ingest(scip_result)
+    n = db.query_to_dicts("MATCH (:File)-[:IMPORTS]->(:File) RETURN count(*) AS c")[0]["c"]
+    assert n > 0, "expected persisted File->File IMPORTS from SCIP extraction"
+    db.close()

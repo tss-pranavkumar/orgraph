@@ -1,11 +1,14 @@
 """Ingests an ExtractionResult into the Kuzu graph."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from orgraph.extract.types import ExtractionResult
 from orgraph.graph.kuzu import OrgraphDB
+
+_log = logging.getLogger("orgraph.graph.builder")
 
 _PARAM_RE = re.compile(r"\$(\w+)")
 
@@ -19,15 +22,47 @@ def _used_params(cypher: str, params: dict) -> dict:
 # Node labels that have line_number-based primary keys
 _SYMBOL_LABELS = frozenset({"Function", "Class", "Interface", "Struct", "Enum", "Variable", "Module"})
 
-# Edge relation → (from_labels, to_labels) — Kuzu requires explicit node table pairs
+# Edge relation → (from_labels, to_labels) — Kuzu requires explicit node table pairs.
+# IMPORTS is special-cased in _write_edges (File→File matched by path, not uid).
+# Only symbol-table (uid-keyed) pairs belong here — File/Directory CONTAINS edges are
+# written separately in _write_file_nodes (File is path-keyed, has no `uid`, so a
+# `MATCH (:File {uid})` would raise). Every pair below must be a valid schema FROM/TO
+# pair, so a MATCH that finds nothing returns 0 rows (not an error) and an exception
+# therefore unambiguously signals a real schema/column mismatch.
 _EDGE_TABLES: dict[str, list[tuple[str, str]]] = {
     "CALLS":      [("Function", "Function"), ("Function", "Class"), ("Class", "Function")],
-    "IMPORTS":    [("File", "Module")],
     "INHERITS":   [("Class", "Class"), ("Class", "Interface"), ("Interface", "Interface"), ("Struct", "Struct")],
-    "CONTAINS":   [("File", "Function"), ("File", "Class"), ("File", "Enum"), ("File", "Struct"),
-                   ("File", "Variable"), ("Directory", "File")],
+    "CONTAINS":   [("Class", "Function")],
     "IMPLEMENTS": [("Class", "Interface"), ("Struct", "Interface")],
 }
+
+# Columns each rel table actually has (mirrors schema.py rel DDL). _write_edges
+# SETs ONLY these per relation — never a column the table lacks. This is the fix
+# for the IMPORTS confidence crash (IMPORTS has no `confidence` column, but the old
+# code ran `SET r.confidence` for every relation → every IMPORTS write threw and was
+# swallowed). Keep in lockstep with schema.py; drop-accounting catches drift.
+_EDGE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "CALLS":      ("line_number", "confidence", "call_kind"),
+    "IMPORTS":    ("line_number", "alias"),
+    "INHERITS":   ("line_number", "confidence"),
+    "IMPLEMENTS": ("confidence",),
+    "CONTAINS":   (),
+}
+
+
+def _edge_set(relation: str, edge: dict) -> tuple[str, dict]:
+    """Build the `SET r.col = $col, ...` clause for only the columns `relation` has."""
+    available = {
+        "line_number": edge.get("line_number", 0),
+        "confidence":  edge.get("confidence", "INFERRED"),
+        "call_kind":   edge.get("call_kind", "local"),
+        "alias":       edge.get("alias", "") or "",
+    }
+    cols = _EDGE_COLUMNS.get(relation, ())
+    if not cols:
+        return "", {}
+    clause = "SET " + ", ".join(f"r.{c} = ${c}" for c in cols)
+    return clause, {c: available[c] for c in cols}
 
 # Cypher merge templates per node label
 _MERGE_FUNCTION = """
@@ -154,11 +189,31 @@ class GraphBuilder:
         return count
 
     def ingest(self, result: ExtractionResult) -> tuple[int, int]:
-        """Write nodes then edges. Returns (nodes_written, edges_written)."""
+        """Write nodes then edges. Returns (nodes_written, edges_written).
+
+        Detailed per-relation accounting (extracted vs persisted, drops by reason)
+        is stored on `self.last_ingest_summary` so silent loss is observable and
+        testable. A whole-relation drop (extracted > 0 but persisted == 0) or any
+        `schema-error` is logged at WARNING.
+        """
         node_count = self._write_nodes(result)
         self._write_file_nodes(result)
-        edge_count = self._write_edges(result)
+        edge_count, summary = self._write_edges(result)
+        self.last_ingest_summary = {"nodes_written": node_count, **summary}
+        self._warn_on_loss(summary)
         return node_count, edge_count
+
+    @staticmethod
+    def _warn_on_loss(summary: dict) -> None:
+        extracted = summary.get("extracted", {})
+        persisted = summary.get("persisted", {})
+        drops = summary.get("drops", {})
+        for rel, n in extracted.items():
+            if n > 0 and persisted.get(rel, 0) == 0:
+                _log.warning("orgraph: relation %s fully dropped on write (%d extracted, 0 persisted)", rel, n)
+        for key, n in drops.items():
+            if key.endswith(":schema-error") and n:
+                _log.warning("orgraph: %d %s edge writes hit a schema error (column/table mismatch)", n, key.split(":")[0])
 
     def _write_nodes(self, result: ExtractionResult) -> int:
         count = 0
@@ -219,41 +274,99 @@ class GraphBuilder:
                     except Exception:
                         pass
 
-    def _write_edges(self, result: ExtractionResult) -> int:
+    def _write_edges(self, result: ExtractionResult) -> tuple[int, dict]:
+        """Write edges with accurate persistence accounting.
+
+        Returns (edges_persisted, summary). `summary` carries per-relation
+        extracted/persisted counts and a `drops` breakdown by reason:
+          - src-missing / dst-missing : edge had an empty endpoint uid
+          - dst-missing-external      : import target's file is outside the graph (legit)
+          - self-import               : a file importing itself (legit)
+          - unresolved-external       : endpoint symbol not in the graph (stdlib/external — legit)
+          - no-label-pair             : both endpoints exist but no rel FROM/TO pair allows it (BUG)
+          - schema-error              : the write raised — column/table mismatch (BUG)
+        """
+        uid_to_path = {n["uid"]: n.get("path", "") for n in result.nodes if n.get("uid")}
+        uid_set = set(uid_to_path)
+        persisted: dict[str, int] = {}
+        extracted: dict[str, int] = {}
+        drops: dict[str, int] = {}
+
+        def bump(d: dict, k: str) -> None:
+            d[k] = d.get(k, 0) + 1
+
+        def drop(relation: str, reason: str) -> None:
+            bump(drops, f"{relation}:{reason}")
+
         count = 0
         for edge in result.edges:
             relation = edge.get("relation", "CALLS")
-            src_uid = edge.get("source_uid", "")
-            dst_uid = edge.get("target_uid", "")
-            if not src_uid or not dst_uid:
+            bump(extracted, relation)
+            set_clause, set_params = _edge_set(relation, edge)
+
+            # IMPORTS is File→File, keyed by path (not uid) — handle before uid checks.
+            if relation == "IMPORTS":
+                ok, reason = self._write_import(edge, set_clause, set_params)
+                if ok:
+                    bump(persisted, relation); count += 1
+                else:
+                    drop(relation, reason)
                 continue
 
-            confidence = edge.get("confidence", "INFERRED")
-            line_no = edge.get("line_number", 0)
-            call_kind = edge.get("call_kind", "local")
+            src_uid = edge.get("source_uid", "")
+            dst_uid = edge.get("target_uid", "")
+            if not src_uid:
+                drop(relation, "src-missing"); continue
+            if not dst_uid:
+                drop(relation, "dst-missing"); continue
 
-            # Try each valid (src_label, dst_label) pair for this relation
             pairs = _EDGE_TABLES.get(relation, [])
-            written = False
+            written = schema_error = False
             for src_label, dst_label in pairs:
+                cypher = (
+                    f"MATCH (s:{src_label} {{uid: $src}}), (d:{dst_label} {{uid: $dst}}) "
+                    f"MERGE (s)-[r:{relation}]->(d) {set_clause} RETURN count(r) AS c"
+                )
                 try:
-                    cypher = (
-                        f"MATCH (s:{src_label} {{uid: $src}}), (d:{dst_label} {{uid: $dst}}) "
-                        f"MERGE (s)-[r:{relation}]->(d) "
-                        f"SET r.confidence = $conf, r.line_number = $line"
-                    )
-                    params = {
-                        "src": src_uid, "dst": dst_uid,
-                        "conf": confidence, "line": line_no,
-                    }
-                    if relation == "CALLS":
-                        cypher += ", r.call_kind = $call_kind"
-                        params["call_kind"] = call_kind
-                    self.db.execute(cypher, params)
+                    rows = self.db.query_to_dicts(cypher, {"src": src_uid, "dst": dst_uid, **set_params})
+                except Exception:
+                    schema_error = True
+                    break
+                if rows and rows[0].get("c", 0) > 0:
                     written = True
                     break
-                except Exception:
-                    continue
             if written:
-                count += 1
-        return count
+                bump(persisted, relation); count += 1
+            elif schema_error:
+                drop(relation, "schema-error")
+            elif src_uid in uid_set and dst_uid in uid_set:
+                drop(relation, "no-label-pair")   # both nodes exist but no FROM/TO pair allows the edge
+            else:
+                drop(relation, "unresolved-external")   # endpoint not in graph (stdlib/external) — legitimate
+        return count, {"extracted": extracted, "persisted": persisted, "drops": drops}
+
+    def _write_import(self, edge: dict, set_clause: str, set_params: dict) -> tuple[bool, str]:
+        """Persist a File→File IMPORTS edge (both endpoints pre-resolved to paths).
+
+        The extractor resolves the importing file (`src_path`) and the imported
+        symbol's defining file (`dst_path`); we match both File nodes by path.
+        """
+        src_path = edge.get("src_path", "")
+        dst_path = edge.get("dst_path", "")
+        if not src_path:
+            return False, "src-missing"
+        if not dst_path:
+            return False, "dst-missing-external"   # imported symbol defined outside the graph (stdlib/3rd-party)
+        if src_path == dst_path:
+            return False, "self-import"
+        cypher = (
+            "MATCH (s:File {path: $sp}), (d:File {path: $dp}) "
+            f"MERGE (s)-[r:IMPORTS]->(d) {set_clause} RETURN count(r) AS c"
+        )
+        try:
+            rows = self.db.query_to_dicts(cypher, {"sp": src_path, "dp": dst_path, **set_params})
+        except Exception:
+            return False, "schema-error"
+        if rows and rows[0].get("c", 0) > 0:
+            return True, ""
+        return False, "unresolved-external"   # a File node for one side wasn't created

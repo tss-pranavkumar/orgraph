@@ -52,6 +52,11 @@ _FALCON_ROUTE_RE = re.compile(
     r"\.add_route\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*"
     r"(?P<class>[A-Za-z_][\w.]*)\s*\("
 )
+# Matches: app.add_route(settings.API_PREFIX + '/path', MyResource())
+_FALCON_ROUTE_CONCAT_RE = re.compile(
+    r"\.add_route\(\s*\w[\w.]*\s*\+\s*['\"](?P<path>/[^'\"]*)['\"]"
+    r"\s*,\s*(?P<class>[A-Za-z_][\w.]*)\s*\("
+)
 _CELERY_DISPATCH_RE = re.compile(
     r"\b(?P<target>[A-Za-z_][\w.]*)\s*\.\s*(?P<method>apply_async|delay)\s*\("
 )
@@ -108,7 +113,12 @@ class TreeSitterExtractor:
             return ExtractionResult(extractor="treesitter")
 
         raw = extract(files, cache_root=self.repo_path, parallel=True)
-        return self._convert(raw)
+        result = self._convert(raw)
+        # Type-resolution pass: rewrite receiver-typed / super() calls to their
+        # compiler-correct targets (graphify only name-matches). Mutates result.edges.
+        from orgraph.extract.pyresolve import resolve_python_calls
+        resolve_python_calls(result, files)
+        return result
 
     def _convert(self, raw: dict) -> ExtractionResult:
         raw_nodes: list[dict] = raw.get("nodes", [])
@@ -130,6 +140,8 @@ class TreeSitterExtractor:
 
         # Build id → NodeDict map for uid resolution
         id_to_uid: dict[str, str] = {}
+        id_to_path: dict[str, str] = {}   # raw id → abs file path (incl. bare file nodes)
+        module_to_path: dict[str, str] = {}   # module stem (e.g. "handlers") → abs file path
         nodes: list[NodeDict] = []
 
         for n in raw_nodes:
@@ -157,10 +169,15 @@ class TreeSitterExtractor:
             src_loc = n.get("source_location", "")
             line_no = int(src_loc.lstrip("L")) if src_loc and src_loc.startswith("L") else 0
             lang = _infer_lang(src_file)
+            id_to_path[n["id"]] = abs_path
 
             # Skip bare file nodes (label ends with .py/.js etc.) — we generate File nodes in builder
             if "." in name and name.count(".") == 1 and not name.startswith("."):
                 id_to_uid[n["id"]] = make_uid(name, abs_path, 0)
+                # Record module stem → file path so IMPORTS edges that reference a
+                # bare module name (graphify's "handlers", "models") resolve to a file.
+                if abs_path:
+                    module_to_path[Path(name).stem] = abs_path
                 continue
 
             # Type inference:
@@ -203,6 +220,12 @@ class TreeSitterExtractor:
 
         edges: list[EdgeDict] = []
         for e in raw_edges:
+            relation = _RELATION_MAP.get(e.get("relation", ""), "CALLS")
+            # IMPORTS is resolved separately into File→File edges (graphify import
+            # edges reference bare module names that don't map to symbol uids).
+            if relation == "IMPORTS":
+                continue
+
             src_id = e.get("source", "")
             dst_id = e.get("target", "")
             src_uid = id_to_uid.get(src_id)
@@ -210,7 +233,6 @@ class TreeSitterExtractor:
             if not src_uid or not dst_uid or src_uid == dst_uid:
                 continue
 
-            relation = _RELATION_MAP.get(e.get("relation", ""), "CALLS")
             confidence = e.get("confidence", "INFERRED")
             line_no = 0
             if src_loc := e.get("source_location", ""):
@@ -220,17 +242,53 @@ class TreeSitterExtractor:
                     except ValueError:
                         pass
 
-            edge: EdgeDict = {
+            edges.append({
                 "source_uid": src_uid,
                 "target_uid": dst_uid,
                 "relation": relation,
                 "confidence": confidence,
                 "line_number": line_no,
-            }
-            edges.append(edge)
+            })
 
+        edges.extend(self._resolve_import_edges(raw_edges, id_to_path, module_to_path))
         edges.extend(self._extract_celery_dispatch_edges(nodes))
         return ExtractionResult(nodes=nodes, edges=edges, extractor="treesitter")
+
+    def _resolve_import_edges(
+        self, raw_edges: list[dict], id_to_path: dict[str, str], module_to_path: dict[str, str],
+    ) -> list[EdgeDict]:
+        """Resolve graphify import edges to deduped File→File coupling edges.
+
+        graphify emits imports as a mix of (file → module-name) and
+        (module-name → symbol) where module names are bare strings, not node ids.
+        We resolve both endpoints to a file path — via the node-id map (files +
+        symbols carry a path) or the module-stem map — and emit one IMPORTS edge per
+        importing/defining file pair. This is the file-level coupling `deps` reports.
+        """
+        def to_path(token: str) -> str:
+            if token in id_to_path:
+                return id_to_path[token]
+            return module_to_path.get(token) or module_to_path.get(token.split(".")[-1], "")
+
+        out: list[EdgeDict] = []
+        seen: set[tuple[str, str]] = set()
+        for e in raw_edges:
+            if _RELATION_MAP.get(e.get("relation", ""), "") != "IMPORTS":
+                continue
+            sp = to_path(e.get("source", ""))
+            dp = to_path(e.get("target", ""))
+            if not sp or not dp or sp == dp:
+                continue
+            key = (sp, dp)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "source_uid": "", "target_uid": "", "relation": "IMPORTS",
+                "confidence": "INFERRED", "line_number": 0,
+                "src_path": sp, "dst_path": dp, "alias": "",
+            })
+        return out
 
     def _collect_falcon_routes(self) -> dict[str, str]:
         routes: dict[str, str] = {}
@@ -241,6 +299,10 @@ class TreeSitterExtractor:
             for match in _FALCON_ROUTE_RE.finditer(source):
                 class_name = match.group("class").split(".")[-1]
                 routes.setdefault(class_name, match.group("path"))
+            for match in _FALCON_ROUTE_CONCAT_RE.finditer(source):
+                class_name = match.group("class").split(".")[-1]
+                # prefix is dynamic (e.g. settings.API_PREFIX); record the suffix only
+                routes.setdefault(class_name, "{prefix}" + match.group("path"))
         return routes
 
     def _extract_celery_dispatch_edges(self, nodes: list[NodeDict]) -> list[EdgeDict]:
@@ -268,6 +330,9 @@ class TreeSitterExtractor:
             if not source:
                 continue
             for match in _CELERY_DISPATCH_RE.finditer(source):
+                line_start = source.rfind("\n", 0, match.start()) + 1
+                if "#" in source[line_start:match.start()]:
+                    continue  # dispatch sits after '#' on its line → commented-out code
                 line_no = _line_number(source, match.start())
                 target_name = match.group("target").split(".")[-1]
                 target = by_name.get(target_name)
