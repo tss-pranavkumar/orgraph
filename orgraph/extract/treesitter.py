@@ -266,6 +266,13 @@ class TreeSitterExtractor:
         importing/defining file pair. This is the file-level coupling `deps` reports.
         """
         def to_path(token: str) -> str:
+            # Prefer the node-id map (files + symbols carry their real path); the
+            # module-stem map is a fallback for bare module-name tokens.
+            # Known limitation: module_to_path is keyed by file *stem*, so two files
+            # sharing a stem in different dirs (e.g. users/models.py, orders/models.py)
+            # collide — a stem-fallback resolution then picks one. id_to_path covers
+            # the common cases; revisit by keying on the dotted module path if this
+            # ever loses real coupling.
             if token in id_to_path:
                 return id_to_path[token]
             return module_to_path.get(token) or module_to_path.get(token.split(".")[-1], "")

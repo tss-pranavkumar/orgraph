@@ -218,6 +218,24 @@ def test_deps_returns_imports(tmp_path):
     db.close()
 
 
+def test_deps_imported_by_lists_importers(tmp_path):
+    """get_dependencies('imported_by') reports the IMPORTING files, not the target itself.
+
+    Regression: the rows wrongly set path=cur_path, so `deps --imported_by` printed
+    the queried file repeated instead of its dependents.
+    """
+    from orgraph.graph.query import get_dependencies
+    db, _ = _ingest_fixture(tmp_path)
+    auth = db.query_to_dicts("MATCH (f:File) WHERE f.name = 'auth.py' RETURN f.path AS p")[0]["p"]
+    deps = get_dependencies(db, auth, "imported_by", 1)
+    assert deps, "expected at least one importer of auth.py"
+    # the rendered field (`path`) must be the importer, never the queried file
+    paths = {d["path"] for d in deps}
+    assert auth not in paths, f"imported_by must not list the target itself; got {paths}"
+    assert any(p.endswith("handlers.py") for p in paths), f"handlers.py imports auth.py; got {paths}"
+    db.close()
+
+
 def test_no_whole_relation_silent_drop(tmp_path):
     """Every extracted relation persists at least one edge; no schema-error drops."""
     _, builder = _ingest_fixture(tmp_path)
