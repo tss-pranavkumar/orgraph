@@ -418,8 +418,8 @@ def get_dependencies(
                 if target and target not in visited:
                     visited.add(target)
                     deps.append({
-                        "from_file": target, "name": r.get("name") or Path(target).name,
-                        "path": cur_path, "alias": r.get("alias") or "", "transitive": d > 0,
+                        "from_file": cur_path, "name": r.get("name") or Path(target).name,
+                        "path": target, "alias": r.get("alias") or "", "transitive": d > 0,
                     })
                     frontier.append((target, d + 1))
 
@@ -433,8 +433,8 @@ def get_dependencies(
                 if dep and dep not in visited:
                     visited.add(dep)
                     deps.append({
-                        "from_file": dep, "name": Path(dep).name,
-                        "path": cur_path, "alias": "", "transitive": d > 0,
+                        "from_file": cur_path, "name": Path(dep).name,
+                        "path": dep, "alias": "", "transitive": d > 0,
                     })
                     frontier.append((dep, d + 1))
 
