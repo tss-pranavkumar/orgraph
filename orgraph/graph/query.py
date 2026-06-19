@@ -272,7 +272,8 @@ def get_http_handlers(db: OrgraphDB) -> list[dict[str, Any]]:
     return db.query_to_dicts(
         "MATCH (f:Function) WHERE f.http_method <> '' "
         "RETURN f.name AS name, f.path AS path, f.line_number AS line, "
-        "f.http_method AS http_method, f.http_path AS http_path LIMIT 100",
+        "f.http_method AS http_method, f.http_path AS http_path "
+        "ORDER BY f.path, f.line_number",
     )
 
 
@@ -285,10 +286,73 @@ def get_celery_dispatches(db: OrgraphDB) -> list[dict[str, Any]]:
             "RETURN caller.name AS caller, caller.path AS caller_path, "
             "caller.line_number AS caller_line, callee.name AS task, "
             "callee.path AS task_path, callee.line_number AS task_line, "
-            "r.line_number AS line LIMIT 100",
+            "r.line_number AS line ORDER BY caller.path, caller.line_number",
         )
     except Exception:
         return []
+
+
+# ── Path finding ─────────────────────────────────────────────────────────────
+
+def find_path(
+    db: OrgraphDB,
+    from_uid: str,
+    to_uid: str,
+    max_hops: int = 15,
+) -> list[dict[str, Any]] | None:
+    """BFS shortest path between two symbols via CALLS edges.
+
+    Returns an ordered list of {name, path, line} dicts from source to target
+    (inclusive), or None if no path exists within max_hops.
+    """
+    if from_uid == to_uid:
+        return []
+
+    # parent map: uid → (parent_uid, node_dict)
+    parent: dict[str, tuple[str | None, dict[str, Any]]] = {}
+
+    root_rows = db.query_to_dicts(
+        "MATCH (s) WHERE s.uid = $uid RETURN s.name AS name, s.path AS path, s.line_number AS line LIMIT 1",
+        {"uid": from_uid},
+    )
+    if not root_rows:
+        return None
+    parent[from_uid] = (None, root_rows[0])
+
+    frontier: list[str] = [from_uid]
+    hops = 0
+
+    while frontier and hops < max_hops:
+        next_frontier: list[str] = []
+        for uid in frontier:
+            edges = get_call_edges(db, uid, "callees")
+            for e in edges:
+                nuid = e["uid"]
+                if nuid in parent:
+                    continue
+                parent[nuid] = (uid, {"name": e["name"], "path": e.get("path") or "", "line": e.get("line") or 0})
+                if nuid == to_uid:
+                    return _reconstruct_path(parent, from_uid, to_uid)
+                next_frontier.append(nuid)
+        frontier = next_frontier
+        hops += 1
+
+    return None
+
+
+def _reconstruct_path(
+    parent: dict[str, tuple[str | None, dict[str, Any]]],
+    from_uid: str,
+    to_uid: str,
+) -> list[dict[str, Any]]:
+    path: list[dict[str, Any]] = []
+    uid: str | None = to_uid
+    while uid is not None:
+        p_uid, node = parent[uid]
+        path.append({"uid": uid, **node})
+        uid = p_uid
+    path.reverse()
+    return path
 
 
 # ── Dependency traversal ──────────────────────────────────────────────────────
@@ -317,8 +381,8 @@ def get_dependencies(
 
         if direction == "imports":
             for r in db.query_to_dicts(
-                "MATCH (f:File {path: $path})-[r:IMPORTS]->(m:Module) "
-                "RETURN m.name AS name, m.path AS mpath, r.alias AS alias LIMIT 50",
+                "MATCH (f:File {path: $path})-[r:IMPORTS]->(d:File) "
+                "RETURN d.name AS name, d.path AS mpath, r.alias AS alias LIMIT 50",
                 {"path": cur_path},
             ):
                 target = r.get("mpath") or r.get("name") or ""
@@ -345,6 +409,20 @@ def get_dependencies(
                     })
                     frontier.append((dep, d + 1))
         else:
+            for r in db.query_to_dicts(
+                "MATCH (f:File)-[r:IMPORTS]->(d:File {path: $path}) "
+                "RETURN f.path AS mpath, f.name AS name, r.alias AS alias LIMIT 50",
+                {"path": cur_path},
+            ):
+                target = r.get("mpath") or ""
+                if target and target not in visited:
+                    visited.add(target)
+                    deps.append({
+                        "from_file": target, "name": r.get("name") or Path(target).name,
+                        "path": cur_path, "alias": r.get("alias") or "", "transitive": d > 0,
+                    })
+                    frontier.append((target, d + 1))
+
             for r in db.query_to_dicts(
                 "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
                 "WHERE callee.path = $path AND caller.path <> $path "

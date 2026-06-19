@@ -119,7 +119,7 @@ _EDGE_TABLES = [
         call_kind STRING
     )""",
     """CREATE REL TABLE IF NOT EXISTS IMPORTS(
-        FROM File TO Module,
+        FROM File TO File,
         line_number INT64,
         alias STRING
     )""",
@@ -165,15 +165,44 @@ _MIGRATIONS = [
 ]
 
 
+def _drop_legacy_imports(db: OrgraphDB) -> None:
+    """IMPORTS changed from `File→Module` to `File→File`.
+
+    Kuzu cannot ALTER a rel table's FROM/TO endpoints, and `CREATE ... IF NOT
+    EXISTS` never redefines an existing table — so a DB built by an older orgraph
+    keeps the legacy `File→Module` shape and every new `File→File` write fails.
+    The legacy table never persisted a single edge (the unconditional
+    `SET r.confidence` write bug guaranteed it), so dropping it loses nothing; the
+    create loop then recreates it with the new endpoints. No-op when IMPORTS is
+    absent (fresh DB) or already `File→File` (up-to-date DB).
+    """
+    try:
+        rows = db.query_to_dicts("CALL show_connection('IMPORTS') RETURN *")
+    except Exception:
+        return  # table absent (fresh DB) or unsupported call — nothing to migrate
+    blob = " ".join(str(v) for row in rows for v in row.values())
+    if "Module" in blob:
+        try:
+            db.execute("DROP TABLE IMPORTS")
+        except Exception:
+            pass
+
+
 def create_schema(db: OrgraphDB) -> None:
     """Create all node and edge tables. Safe to call on an existing DB (IF NOT EXISTS).
 
     Also applies idempotent column migrations so a graph built by an older orgraph
     version gains columns added later (each ALTER raises if the column already
     exists, which is the expected no-op on an up-to-date DB).
+
+    NOTE: Kuzu rel-table FROM/TO pairs are immutable — neither ALTER nor
+    CREATE IF NOT EXISTS can change them. Endpoint changes (e.g. IMPORTS
+    File→Module → File→File) require detect-and-drop (see _drop_legacy_imports);
+    adding a new FROM/TO pair to a table that holds data requires a full reindex.
     """
     for ddl in _NODE_TABLES:
         db.execute(ddl)
+    _drop_legacy_imports(db)
     for ddl in _EDGE_TABLES:
         db.execute(ddl)
     for ddl in _MIGRATIONS:

@@ -30,6 +30,8 @@ class EdgeDict(TypedDict, total=False):
     line_number: int
     call_kind: str      # for CALLS: "local"|"celery_dispatch"|...
     alias: str          # for IMPORTS
+    src_path: str       # for IMPORTS: importing file's abs path (File→File roll-up)
+    dst_path: str       # for IMPORTS: imported symbol's defining file abs path
 
 
 @dataclass

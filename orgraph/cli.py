@@ -485,6 +485,75 @@ def trace(symbol: str, repo_path: str, depth: int, direction: str) -> None:
     console.print(f"\n[dim]{len(chain)} call(s) traced, depth={depth}[/]")
 
 
+@main.command("path")
+@click.argument("from_symbol")
+@click.argument("to_symbol")
+@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
+@click.option("--max-hops", default=15, show_default=True, help="Maximum call hops to search.")
+def path_find(from_symbol: str, to_symbol: str, repo_path: str, max_hops: int) -> None:
+    """Find the shortest call path between two symbols.
+
+    Answers: "how does FROM reach TO in the call graph?" Useful for tracing
+    how an entry point eventually invokes a deep utility, or confirming two
+    functions are connected at all.
+
+    \b
+    EXAMPLES:
+      orgraph path executeArg glamourRender .
+      orgraph path on_post validate_coupon .
+      orgraph path create_order send_confirmation . --max-hops 20
+    """
+    repo = Path(repo_path).resolve()
+    db_path = _orgraph_dir(repo) / "graph.kuzu"
+    if not db_path.exists():
+        console.print("[red]Not indexed. Run `orgraph index` first.[/]")
+        raise SystemExit(1)
+
+    from orgraph.graph.kuzu import open_db_readonly
+    from orgraph.graph import query as gq
+
+    with open_db_readonly(db_path) as db:
+        from_roots = gq.resolve_symbol(db, from_symbol)
+        to_roots = gq.resolve_symbol(db, to_symbol)
+
+        if not from_roots:
+            console.print(f"[red]Symbol '{from_symbol}' not found.[/]")
+            raise SystemExit(1)
+        if not to_roots:
+            console.print(f"[red]Symbol '{to_symbol}' not found.[/]")
+            raise SystemExit(1)
+
+        from_node = from_roots[0]
+        to_node = to_roots[0]
+        path = gq.find_path(db, from_node["uid"], to_node["uid"], max_hops)
+
+    repo_str = str(repo) + "/"
+
+    if path is None:
+        console.print(
+            f"\n[yellow]No path found[/] from [cyan]{from_node['name']}[/] "
+            f"to [cyan]{to_node['name']}[/] within {max_hops} hops.\n"
+        )
+        return
+
+    console.print(
+        f"\n[bold cyan]Path[/] [bold yellow]{from_node['name']}[/] "
+        f"→ [bold yellow]{to_node['name']}[/]  "
+        f"[dim]{len(path) - 1} hop(s)[/]\n"
+    )
+
+    for i, step in enumerate(path):
+        rel_path = step["path"].replace(repo_str, "") if step["path"] else ""
+        connector = "    " if i == 0 else " └→ " if i == len(path) - 1 else " ├→ "
+        prefix = "  " * max(0, i - 1) if i > 0 else ""
+        if i == 0:
+            console.print(f"[bold cyan]{step['name']}[/]  [dim]{rel_path}:{step['line']}[/]")
+        else:
+            indent = "  " * (i - 1)
+            connector = "└→ " if i == len(path) - 1 else "├→ "
+            console.print(f"{indent}[dim]{connector}[/][cyan]{step['name']}[/]  [dim]{rel_path}:{step['line']}[/]")
+
+
 @main.command("file")
 @click.argument("file_path")
 @click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))

@@ -23,6 +23,7 @@ Once configured, your agent has 6 tools:
 |---|---|
 | `search(query)` | Hybrid BM25+semantic search — find code by description |
 | `trace(symbol, direction, depth)` | Follow call chains forward (`callees`) or backward (`callers`) |
+| `find_path(from_symbol, to_symbol)` | Shortest call path between two named symbols |
 | `get_context(file_or_symbol)` | Topology cluster, community, call depth, indegree — where does this fit? |
 | `find_entry_points(kind)` | HTTP handlers and entry surfaces; `kind = "all" \| "http" \| "topology"` |
 | `get_dependencies(file, direction, depth)` | Import + call dependency tree, forward or reverse |
@@ -71,6 +72,10 @@ orgraph who-calls build_order_model . --depth 2   # callers of callers too
 orgraph trace apply_coupon .
 orgraph trace Coupon.on_post . --depth 3          # 3 levels deep
 orgraph trace apply_coupon . --callers            # same as who-calls, tree form
+
+# How does one function reach another? (shortest path between two symbols)
+orgraph path Coupon.on_post get_valid_coupon .
+orgraph path execute validateStyle . --max-hops 20
 
 # Architectural position — how central is this, what's coupled to it?
 orgraph context controllers/DiscountController.py .

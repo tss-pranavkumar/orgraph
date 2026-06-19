@@ -84,6 +84,7 @@ def test_all_tools_registered(full_index):
         "list_symbols",
         "find_entry_points",
         "get_dependencies",
+        "find_path",
         "reindex",
     }
 
