@@ -62,7 +62,10 @@ def _edge_set(relation: str, edge: dict) -> tuple[str, dict]:
     if not cols:
         return "", {}
     clause = "SET " + ", ".join(f"r.{c} = ${c}" for c in cols)
-    return clause, {c: available[c] for c in cols}
+    # .get() so a future column added to _EDGE_COLUMNS but not to `available`
+    # degrades to a default rather than raising a KeyError (which would be
+    # mis-accounted as a schema-error and drop the whole relation).
+    return clause, {c: available.get(c, "") for c in cols}
 
 # Cypher merge templates per node label
 _MERGE_FUNCTION = """
@@ -144,6 +147,9 @@ class GraphBuilder:
     def __init__(self, db: OrgraphDB, repo_path: Path) -> None:
         self.db = db
         self.repo_path = repo_path
+        # Populated by ingest(); initialised here so callers can read it safely
+        # even if ingest() returns early.
+        self.last_ingest_summary: dict = {"nodes_written": 0, "extracted": {}, "persisted": {}, "drops": {}}
 
     def clear(self) -> int:
         """Delete every node (DETACH removes all incident edges). Returns nodes deleted.

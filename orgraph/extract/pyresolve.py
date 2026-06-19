@@ -76,6 +76,17 @@ def _collect_bindings(body_node) -> tuple[dict[str, str], dict[str, str]]:
     """
     local_types: dict[str, str] = {}
     self_attrs: dict[str, str] = {}
+    ambiguous_local: set[str] = set()
+    ambiguous_attr: set[str] = set()
+
+    def bind(store: dict[str, str], ambiguous: set[str], key: str, cls: str) -> None:
+        # Reassignment to a *different* class makes the binding ambiguous; we
+        # can't pick a type flow-insensitively, so we drop it (prefer a missing
+        # edge over a misleading one) rather than letting last-write-wins emit a
+        # confidently-wrong edge for the earlier call sites.
+        if key in store and store[key] != cls:
+            ambiguous.add(key)
+        store[key] = cls
 
     def walk(n):
         for ch in n.named_children:
@@ -86,15 +97,19 @@ def _collect_bindings(body_node) -> tuple[dict[str, str], dict[str, str]]:
                 left = ch.child_by_field_name("left")
                 if cls and left is not None:
                     if left.type == "identifier":
-                        local_types[_text(left)] = cls
+                        bind(local_types, ambiguous_local, _text(left), cls)
                     elif left.type == "attribute":
                         obj = left.child_by_field_name("object")
                         attr = left.child_by_field_name("attribute")
                         if obj is not None and attr is not None and _text(obj) == "self":
-                            self_attrs[_text(attr)] = cls
+                            bind(self_attrs, ambiguous_attr, _text(attr), cls)
             walk(ch)
 
     walk(body_node)
+    for k in ambiguous_local:
+        local_types.pop(k, None)
+    for k in ambiguous_attr:
+        self_attrs.pop(k, None)
     return local_types, self_attrs
 
 

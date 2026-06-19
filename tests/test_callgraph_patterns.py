@@ -44,3 +44,25 @@ def test_callgraph_recall_baseline(tmp_path):
             hits += 1
     print(f"\ncall-graph fixture recall: {hits}/{total} patterns")
     assert total > 0
+
+
+def test_pyresolve_backs_off_on_ambiguous_reassignment(tmp_path):
+    """A var reassigned to a different class must NOT yield a confidently-wrong
+    resolved edge (regression for last-write-wins flow-insensitivity)."""
+    from orgraph.extract.treesitter import TreeSitterExtractor
+
+    (tmp_path / "m.py").write_text(
+        "class A:\n    def run(self):\n        pass\n\n"
+        "class B:\n    def run(self):\n        pass\n\n"
+        "def f():\n    x = A()\n    x.run()\n    x = B()\n    x.run()\n"
+    )
+    result = TreeSitterExtractor(tmp_path).run()
+    uid_name = {n["uid"]: n["name"] for n in result.nodes}
+    resolved = {
+        (uid_name.get(e["source_uid"]), uid_name.get(e["target_uid"]))
+        for e in result.edges
+        if e.get("relation") == "CALLS" and e.get("call_kind") == "resolved"
+    }
+    # ambiguous `x` → resolver must not emit a resolved edge to either A.run or B.run
+    assert ("f", "A.run") not in resolved, f"wrong resolved edge: {resolved}"
+    assert ("f", "B.run") not in resolved, f"wrong resolved edge: {resolved}"
