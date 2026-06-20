@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.1.32 - 2026-06-21
+
+Close the last gaps blocking competitive parity across Python, TypeScript, and
+Go. Verified end-to-end against real third-party repos (`tinyhttp`, `go-chi/chi`)
+plus synthetic fixtures.
+
+### Added
+- **TS arrow-function exports become Function nodes.** SCIP emits
+  `export const fn = () => {}` with a `.` (term) descriptor — same suffix as
+  plain `const PI = 3.14`. `_label_from_symbol` couldn't distinguish them
+  without polluting the graph with every constant and ESM re-export. Solved
+  via a pre-scan of `SymbolInformation.documentation`: any `.`-suffix symbol
+  whose hover doc matches `_ARROW_FN_DOC_RE` (an `=>` not part of `==>`,
+  `<=>`, `!=>`, `>=>`) is added to an `arrow_fn_syms` set, and
+  `_label_from_symbol_with_doc` returns `"Function"` for those. Plain
+  non-function consts correctly skip. Verified on `tinyhttp`:
+  `who-calls pushMiddleware` now returns `Router.all`, `Router.use` instead
+  of "Symbol not found"; node count rose from 167 → 261.
+- **Go HTTP entry-point detection** for chi (`r.Get(...)`), gin
+  (`r.GET(...)`), chi/gin generic dispatcher (`r.Method("PUT", ...)`,
+  `r.Handle("POST", ...)`), and stdlib `net/http`
+  (`http.HandleFunc(...)`, `mux.Handle(...)`). Mirrors the Fastify
+  collector shape: returns `dict[handler_name → (METHOD, path)]`, wired into
+  both `treesitter._convert` and `scip._parse_scip`. Stdlib routes record
+  the verb as `"ANY"` (registration doesn't specify one). Source is
+  pre-stripped of `// line comments` so commented examples don't poison the
+  registry. The `http` receiver is blocklisted to avoid mistaking the HTTP
+  client call `http.Get(url)` for a route registrar.
+- **TS monorepo (`packages/`, `apps/`, `services/`, `libs/`, `modules/`)
+  support.** scip-typescript invoked at a workspace root with a project-
+  references aggregator `tsconfig.json` produces zero documents.
+  `ScipExtractor.run()` now detects sub-packages via `_find_ts_packages`
+  and runs `_run_per_package`, which spawns scip-typescript per
+  sub-package, parses each with `doc_root=pkg_dir`, and merges by deduping
+  nodes on uid and edges on tuple key. Logs `"indexed N/M sub-package(s) →
+  X nodes, Y edges"` to stderr. Without this, every TS monorepo (Next.js,
+  NestJS, Remix, Turborepo) extracted 0 nodes — `tinyhttp` went from
+  0 → 261 nodes.
+- **Cross-package IMPORTS** in TS monorepos via three cooperating pieces:
+  - `_workspace_pkg_sources` reads each sub-package's `package.json` `name`
+    and locates the source-entry (`src/index.ts`/`src/index.tsx`/
+    `index.ts`/`index.tsx`).
+  - `_augmented_tsconfig` is a context manager that *temporarily* injects
+    cross-package `paths` aliases into each sub-package's `tsconfig.json`
+    before scip-typescript runs, then restores the original on exit (even
+    on exception) so the user's workspace is never left mutated. Without
+    this, scip-typescript can't resolve `@scope/pkg` imports to source
+    when the package's `dist/` is missing (unbuilt) or unreachable
+    (pnpm symlinks).
+  - `_collect_global_sym_def_paths` pre-sweeps every per-package scip
+    once for definition occurrences and builds a single `symbol → abs
+    path` map, plumbed into each `_parse_scip` call via the new
+    `sym_def_path_global` arg. Pass 4 falls back to the global map when
+    the local one misses.
+  - `_abs_doc_path` collapses `..` via `os.path.normpath` so the same file
+    always has the same graph key regardless of which scip emitted it.
+  - Verified on `tinyhttp`: `orgraph deps packages/app/src/app.ts` went
+    from 2 → 8 deps, including cross-package edges to `@tinyhttp/router`,
+    `@tinyhttp/req`, `@tinyhttp/url`. Reverse-deps (`--direction
+    imported_by`) likewise resolve cross-package.
+- **Test fixtures + 6 new tests**: `simple_typescript/utils.ts` for arrow-fn
+  coverage; `simple_go/` for the three Go HTTP frameworks plus a non-route
+  helper for negative coverage; `simple_typescript_monorepo/` synthetic
+  2-package fixture proving the global sym_def_path closes the cross-
+  package gap (`test_cross_package_imports_resolve` /
+  `test_cross_package_imports_drop_without_global_map`). 121 tests pass.
+
+## 0.1.31 - 2026-06-20
+
+### Added
+- **Fastify / Express HTTP handler detection.** `_collect_fastify_routes` in
+  `TreeSitterExtractor` scans `.ts`/`.js` files for
+  `plugin.get/post/put/patch/delete/head/options('/path', handler)` calls
+  (with optional options/schema object) and maps bare handler names to
+  `(HTTP_METHOD, path)`. Wired into both the tree-sitter and SCIP
+  extractors so `find_entry_points --kind http` surfaces Fastify/Express
+  handlers alongside Falcon and Celery tasks.
+
 ## 0.1.30 - 2026-06-18
 
 Make the SCIP-backed graph actually accurate, end-to-end, for both Python and
