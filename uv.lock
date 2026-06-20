@@ -906,7 +906,7 @@ wheels = [
 
 [[package]]
 name = "orgraph-mcp"
-version = "0.1.30"
+version = "0.1.32"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

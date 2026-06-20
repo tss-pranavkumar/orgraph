@@ -7,10 +7,26 @@ Falls back gracefully (returns None) when no SCIP binary is installed.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
+
+
+def _abs_doc_path(base: Path, rel: str) -> str:
+    """Canonicalise a SCIP document path string.
+
+    scip-typescript invoked in `packages/a` with a tsconfig that pulls in
+    `../b/src/bar.ts` emits a `relative_path` containing `..`. Joining with
+    base gives `packages/a/../b/src/bar.ts` — the same file as
+    `packages/b/src/bar.ts` but different as a graph key. We collapse `..`
+    segments (pure-string, no filesystem syscalls) so cross-scip lookups and
+    per-scip definitions agree on the same canonical key.
+    """
+    return os.path.normpath(str(base / rel))
 
 from orgraph.extract.types import EdgeDict, ExtractionResult, NodeDict, make_uid
 
@@ -40,6 +56,12 @@ _FALCON_HTTP: dict[str, str] = {
 }
 
 _IGNORED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"})
+
+# Directories where a nested tsconfig.json indicates a sub-package in a TS/JS
+# monorepo (pnpm/yarn/npm workspaces, Turborepo, Nx). scip-typescript invoked at
+# the workspace root with a project-references aggregator tsconfig produces zero
+# documents — we have to run it per-package.
+_TS_PKG_PARENTS = frozenset({"packages", "apps", "services", "libs", "modules"})
 
 # scip-python / scip-typescript do NOT set the SCIP Import symbol-role on import
 # occurrences (verified: only Definition + Read/plain-reference roles appear), so
@@ -99,6 +121,109 @@ def _build_command(lang: str, binary: str, repo_path: Path, out_file: Path, scra
     return None
 
 
+def _workspace_pkg_sources(pkgs: list[Path]) -> dict[str, Path]:
+    """Map workspace package name → its source-entry .ts file (absolute path).
+
+    Reads each sub-package's `package.json` for its `name`, then probes the
+    common source layouts in order: `src/index.ts`, `src/index.tsx`,
+    `index.ts`, `index.tsx`. Packages that don't expose a source-side entry
+    (e.g. shipped only as built `dist/`) are skipped — there's nothing to
+    point a `paths` alias at.
+    """
+    out: dict[str, Path] = {}
+    for pkg_dir in pkgs:
+        pj = pkg_dir / "package.json"
+        if not pj.exists():
+            continue
+        try:
+            data = json.loads(pj.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        name = data.get("name")
+        if not name:
+            continue
+        for rel in ("src/index.ts", "src/index.tsx", "index.ts", "index.tsx"):
+            candidate = pkg_dir / rel
+            if candidate.is_file():
+                out[name] = candidate
+                break
+    return out
+
+
+@contextmanager
+def _augmented_tsconfig(pkg_dir: Path, workspace_paths: dict[str, Path]):
+    """Temporarily inject cross-package `paths` into `pkg_dir/tsconfig.json`.
+
+    scip-typescript only resolves a workspace import to its source if the
+    importing package's tsconfig has a `paths` alias pointing at it
+    (`node_modules/@scope/pkg` typically resolves to the package's built
+    `dist/`, which may not exist on a fresh checkout). We synthesize those
+    aliases on the fly: backup → write augmented → run → restore. Guarded
+    with try/finally so we never leave the user's tsconfig mutated.
+    """
+    tsconfig = pkg_dir / "tsconfig.json"
+    backup: str | None = None
+    if tsconfig.exists() and workspace_paths:
+        try:
+            original = tsconfig.read_text(encoding="utf-8")
+            data = json.loads(original)
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+            co = data.setdefault("compilerOptions", {})
+            if not isinstance(co, dict):
+                raise ValueError("compilerOptions is not an object")
+            co.setdefault("baseUrl", ".")
+            existing_paths = co.get("paths") if isinstance(co.get("paths"), dict) else {}
+            self_name = data.get("name") if isinstance(data.get("name"), str) else None
+            merged = dict(existing_paths)  # don't clobber existing
+            for name, src_path in workspace_paths.items():
+                if name == self_name or name in merged:
+                    continue
+                try:
+                    rel = os.path.relpath(src_path, start=pkg_dir)
+                except Exception:
+                    rel = str(src_path)
+                merged[name] = [rel]
+            if merged != existing_paths:
+                co["paths"] = merged
+                backup = original
+                tsconfig.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            backup = None  # leave original alone — best-effort
+    try:
+        yield
+    finally:
+        if backup is not None:
+            try:
+                tsconfig.write_text(backup, encoding="utf-8")
+            except Exception:
+                pass  # surface as a stderr warning would be nicer; ignore for now
+
+
+def _find_ts_packages(repo_path: Path) -> list[Path]:
+    """Find sub-package roots in a TS/JS monorepo (each has its own tsconfig.json).
+
+    Looks for `tsconfig.json` under conventional workspace parents (packages/, apps/,
+    services/, libs/, modules/). Returns absolute directories, deduped, never
+    including the repo root itself. Empty list = not a monorepo, index at root.
+    """
+    pkgs: list[Path] = []
+    seen: set[Path] = set()
+    for parent in _TS_PKG_PARENTS:
+        parent_dir = repo_path / parent
+        if not parent_dir.is_dir():
+            continue
+        for tc in parent_dir.rglob("tsconfig.json"):
+            if any(part in _IGNORED_DIRS for part in tc.parts):
+                continue
+            pkg_dir = tc.parent.resolve()
+            if pkg_dir in seen or pkg_dir == repo_path.resolve():
+                continue
+            seen.add(pkg_dir)
+            pkgs.append(pkg_dir)
+    return pkgs
+
+
 class ScipExtractor:
     """Runs SCIP on a repo and returns an ExtractionResult. Returns None if unavailable."""
 
@@ -115,6 +240,17 @@ class ScipExtractor:
             return None
 
         self.scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Monorepo path: scip-typescript at a workspace root indexes nothing
+        # useful. Run per-package and merge.
+        if binary == "scip-typescript":
+            pkgs = _find_ts_packages(self.repo_path)
+            if pkgs:
+                merged = self._run_per_package(pkgs, binary)
+                if merged and merged.nodes:
+                    return merged
+                # fall through to root run as a last resort
+
         out_file = self.scratch_dir / "index.scip"
 
         cmd = _build_command(lang, binary, self.repo_path, out_file, self.scratch_dir)
@@ -148,6 +284,86 @@ class ScipExtractor:
             return None
 
         return result
+
+    def _run_per_package(self, pkgs: list[Path], binary: str) -> ExtractionResult | None:
+        """Run scip-typescript inside each sub-package, parse and merge results.
+
+        Two passes over each sub-package's scip:
+          1. Run scip-typescript inside the package, then a CHEAP pre-sweep of
+             definition occurrences to populate a global `sym_def_path` map
+             (scip symbol → abs file path) — this is what makes cross-package
+             IMPORTS edges resolve.
+          2. Full `_parse_scip` with that global map plumbed in, so Pass 4 can
+             find the defining file of a symbol that was imported from another
+             sub-package.
+        """
+        merged_nodes: list[NodeDict] = []
+        merged_edges: list[EdgeDict] = []
+        seen_uids: set[str] = set()
+        ok = 0
+
+        # Synthesize cross-package `paths` aliases so scip-typescript resolves
+        # workspace imports to package sources (vs missing/unbuilt `dist/`).
+        workspace_paths = _workspace_pkg_sources(pkgs)
+
+        # ── Pass A: run scip in each sub-package, collect definition paths ────
+        scip_jobs: list[tuple[Path, Path]] = []  # (scip_file, doc_root=pkg_dir)
+        for i, pkg_dir in enumerate(pkgs):
+            out_file = self.scratch_dir / f"index-{i}.scip"
+            try:
+                with _augmented_tsconfig(pkg_dir, workspace_paths):
+                    proc = subprocess.run(
+                        [binary, "index", "--output", str(out_file)],
+                        cwd=str(pkg_dir),
+                        capture_output=True, text=True, timeout=300,
+                    )
+                if proc.returncode != 0 or not out_file.exists():
+                    continue
+            except Exception:
+                continue
+            scip_jobs.append((out_file, pkg_dir))
+
+        sym_def_path_global = _collect_global_sym_def_paths(scip_jobs)
+
+        # ── Pass B: full parse each scip with the global map plumbed in ───────
+        for scip_file, pkg_dir in scip_jobs:
+            result = _parse_scip(
+                scip_file, self.repo_path,
+                doc_root=pkg_dir,
+                sym_def_path_global=sym_def_path_global,
+            )
+            if not result or not result.nodes:
+                continue
+            ok += 1
+            for node in result.nodes:
+                if node["uid"] in seen_uids:
+                    continue
+                seen_uids.add(node["uid"])
+                merged_nodes.append(node)
+            merged_edges.extend(result.edges)
+
+        if not merged_nodes:
+            return None
+
+        edge_seen: set[tuple] = set()
+        deduped: list[EdgeDict] = []
+        for e in merged_edges:
+            key = (
+                e.get("source_uid"), e.get("target_uid"), e.get("relation"),
+                e.get("line_number"), e.get("src_path"), e.get("dst_path"),
+            )
+            if key in edge_seen:
+                continue
+            edge_seen.add(key)
+            deduped.append(e)
+
+        import sys
+        print(
+            f"orgraph: scip-typescript indexed {ok}/{len(pkgs)} sub-package(s) "
+            f"→ {len(merged_nodes)} nodes, {len(deduped)} edges",
+            file=sys.stderr,
+        )
+        return ExtractionResult(nodes=merged_nodes, edges=deduped, extractor="scip")
 
 
 # ── SCIP symbol descriptor decoding ───────────────────────────────────────────
@@ -188,6 +404,29 @@ def _label_from_symbol(symbol: str) -> str | None:
     if "#" in s and re.search(r"\([0-9a-fA-F]{4,}\)\.$", s):   # overloaded method
         return "Function"
     return None
+
+
+def _label_from_symbol_with_doc(symbol: str, arrow_fn_syms: set[str]) -> str | None:
+    """Same as `_label_from_symbol`, but recognises arrow-function exports.
+
+    `arrow_fn_syms` is the precomputed set of `.`-suffix symbols whose hover doc
+    contains a `=>` arrow — the discriminator that separates `const fn = (x) => x`
+    from a plain `const PI = 3.14`.
+    """
+    base_label = _label_from_symbol(symbol)
+    if base_label is not None:
+        return base_label
+    if symbol.endswith(".") and symbol in arrow_fn_syms:
+        return "Function"
+    return None
+
+
+# Arrow-function exports (`export const fn = () => {}`) come through SCIP with a
+# `.` (term) descriptor — same suffix as plain `const PI = 3.14`. We can't label
+# every `.`-suffixed symbol Function without polluting the graph, so we look at
+# SymbolInformation.documentation for the `=>` of an arrow-fn signature.
+# Negative lookbehinds avoid matching `==>`, `<=>`, `!=>`, `>=>`.
+_ARROW_FN_DOC_RE = re.compile(r"(?<![=!<>])=>")
 
 
 # SCIP descriptors use the same `#` suffix for every type (class, interface, enum,
@@ -249,7 +488,59 @@ def _read_lines(path: Path) -> list[str]:
         return []
 
 
-def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
+def _collect_global_sym_def_paths(
+    scip_jobs: list[tuple[Path, Path]],
+) -> dict[str, str]:
+    """Pre-sweep: open every per-package scip and record `symbol → abs def path`.
+
+    Used by `_run_per_package` to build a cross-scip definition map BEFORE any
+    per-package parse runs Pass 4. Without this, every IMPORTS edge that crosses
+    a workspace boundary drops (the importing scip doesn't know where the
+    imported symbol is defined — that fact lives in the other package's scip).
+
+    Each `scip_jobs` entry is `(scip_file, doc_root)`; `doc_root` is the
+    directory scip-<lang> ran in, so the document's relative_path is joined to
+    it to recover the absolute file path of the definition.
+    """
+    try:
+        from orgraph.extract import scip_pb2  # type: ignore
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for scip_file, doc_root in scip_jobs:
+        try:
+            idx = scip_pb2.Index()
+            idx.ParseFromString(scip_file.read_bytes())
+        except Exception:
+            continue
+        for doc in idx.documents:
+            abs_path = _abs_doc_path(Path(doc_root), doc.relative_path)
+            for occ in doc.occurrences:
+                sym = occ.symbol
+                if sym.startswith("local ") or not _is_definition(occ):
+                    continue
+                out.setdefault(sym, abs_path)
+    return out
+
+
+def _parse_scip(
+    index_path: Path,
+    repo_path: Path,
+    doc_root: Path | None = None,
+    sym_def_path_global: dict[str, str] | None = None,
+) -> ExtractionResult | None:
+    """Parse a SCIP index.
+
+    `doc_root` is the directory scip-<lang> ran in (its document `relative_path`
+    fields are relative to this). Defaults to repo_path when the binary was run
+    at the repo root.
+
+    `sym_def_path_global` is an optional cross-scip definition map (scip symbol →
+    abs file path) used by Pass 4 to resolve IMPORTS edges that cross
+    sub-package boundaries — without it, monorepo workspaces drop every
+    cross-package import (each per-package scip only knows its own definitions).
+    `_run_per_package` builds it via a pre-sweep and passes it here.
+    """
     try:
         from orgraph.extract import scip_pb2  # type: ignore
     except Exception:
@@ -261,12 +552,15 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     except Exception:
         return None
 
+    base = Path(doc_root) if doc_root else repo_path
+
     # Reuse the tree-sitter heuristics for Falcon routes + celery dispatch so that
     # find_entry_points works identically under SCIP (SCIP itself knows neither).
     from orgraph.extract.treesitter import TreeSitterExtractor
     ts = TreeSitterExtractor(repo_path=repo_path)
     routes = ts._collect_falcon_routes()
     fastify_routes = ts._collect_fastify_routes()
+    go_routes = ts._collect_go_http_routes()
 
     # INHERITS relationships still come from SymbolInformation (kind/display_name
     # are empty there, but is_implementation relationships are populated).
@@ -274,6 +568,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     # where we learn class-vs-interface-vs-enum (the descriptor can't say).
     bases: dict[str, list[str]] = {}
     type_label: dict[str, str | None] = {}   # scip symbol → Class/Interface/Enum/Struct (or None)
+    arrow_fn_syms: set[str] = set()          # `.`-suffix symbols whose hover doc shows `=>`
     for doc in index.documents:
         for si in doc.symbols:
             b = [r.symbol for r in si.relationships if getattr(r, "is_implementation", False)]
@@ -281,6 +576,8 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
                 bases[si.symbol] = b
             if si.symbol.endswith("#"):
                 type_label[si.symbol] = _refine_type_label(si.documentation)
+            elif si.symbol.endswith(".") and any(_ARROW_FN_DOC_RE.search(t) for t in si.documentation):
+                arrow_fn_syms.add(si.symbol)
 
     nodes: list[NodeDict] = []
     uid_map: dict[str, str] = {}     # scip symbol → uid
@@ -289,17 +586,17 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
 
     # ── Pass 1: definitions → nodes ────────────────────────────────────────────
     for doc in index.documents:
-        abs_path = str(repo_path / doc.relative_path)
+        abs_path = _abs_doc_path(base, doc.relative_path)
         lang_info = _SCIP_MAP.get(Path(doc.relative_path).suffix)
         lang = lang_info[0] if lang_info else "unknown"
-        src = _read_lines(repo_path / doc.relative_path)
+        src = _read_lines(base / doc.relative_path)
 
         for occ in doc.occurrences:
             sym = occ.symbol
             if sym.startswith("local ") or not _is_definition(occ):
                 continue
             sym_def_path.setdefault(sym, abs_path)   # record before the node-label filter
-            label = _label_from_symbol(sym)
+            label = _label_from_symbol_with_doc(sym, arrow_fn_syms)
             if label is None:
                 continue
             if label == "Type":
@@ -323,6 +620,10 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             elif label == "Function" and lang in ("typescript", "javascript"):
                 if name in fastify_routes:
                     http_method, http_path = fastify_routes[name]
+            elif label == "Function" and lang == "go":
+                bare = name.split(".")[-1]
+                if bare in go_routes:
+                    http_method, http_path = go_routes[bare]
 
             uid = make_uid(name, abs_path, line_no)
             uid_map[sym] = uid
@@ -344,7 +645,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             if _is_definition(o) and not o.symbol.startswith("local ")
             and list(getattr(o, "enclosing_range", []))
         ]
-        src = _read_lines(repo_path / doc.relative_path)
+        src = _read_lines(base / doc.relative_path)
         for occ in doc.occurrences:
             sym = occ.symbol
             if sym.startswith("local ") or _is_definition(occ):
@@ -398,8 +699,8 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     # the same File→File model the tree-sitter path and `deps` use.
     import_seen: set[tuple[str, str]] = set()
     for doc in index.documents:
-        abs_path = str(repo_path / doc.relative_path)
-        src = _read_lines(repo_path / doc.relative_path)
+        abs_path = _abs_doc_path(base, doc.relative_path)
+        src = _read_lines(base / doc.relative_path)
         if not src:
             continue
         for occ in doc.occurrences:
@@ -412,7 +713,11 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             row = r[0]
             if row >= len(src) or not _IMPORT_LINE_RE.search(src[row]):
                 continue
+            # Prefer this scip's own definition (single-package fast path); fall
+            # back to the cross-scip global map when we're inside a monorepo run.
             dst_path = sym_def_path.get(sym)
+            if not dst_path and sym_def_path_global is not None:
+                dst_path = sym_def_path_global.get(sym)
             if not dst_path or dst_path == abs_path:
                 continue
             key = (abs_path, dst_path)
