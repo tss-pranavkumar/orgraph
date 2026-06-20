@@ -17,6 +17,15 @@ FIXTURE_SCIP = Path(__file__).parent / "fixtures" / "simple_python.scip"
 TS_FIXTURE_DIR = (Path(__file__).parent / "fixtures" / "simple_typescript").resolve()
 TS_FIXTURE_SCIP = Path(__file__).parent / "fixtures" / "simple_typescript.scip"
 
+GO_FIXTURE_DIR = (Path(__file__).parent / "fixtures" / "simple_go").resolve()
+GO_FIXTURE_SCIP = Path(__file__).parent / "fixtures" / "simple_go.scip"
+
+MONOREPO_FIXTURE_DIR = (
+    Path(__file__).parent / "fixtures" / "simple_typescript_monorepo"
+).resolve()
+MONOREPO_A_SCIP = MONOREPO_FIXTURE_DIR / "a.scip"
+MONOREPO_B_SCIP = MONOREPO_FIXTURE_DIR / "b.scip"
+
 
 @pytest.fixture(scope="module")
 def scip_result():
@@ -30,6 +39,13 @@ def ts_scip_result():
     from orgraph.extract.scip import _parse_scip
     assert TS_FIXTURE_SCIP.exists(), "TS fixture SCIP index missing"
     return _parse_scip(TS_FIXTURE_SCIP, TS_FIXTURE_DIR)
+
+
+@pytest.fixture(scope="module")
+def go_scip_result():
+    from orgraph.extract.scip import _parse_scip
+    assert GO_FIXTURE_SCIP.exists(), "Go fixture SCIP index missing"
+    return _parse_scip(GO_FIXTURE_SCIP, GO_FIXTURE_DIR)
 
 
 def test_parse_yields_functions_and_classes(scip_result):
@@ -217,6 +233,130 @@ def test_scip_emits_file_to_file_imports(scip_result):
     for e in imports:
         assert e["src_path"] != e["dst_path"], "self-import should be excluded"
         assert e.get("source_uid") == "" and e.get("target_uid") == "", "IMPORTS is path-keyed"
+
+
+def test_ts_arrow_function_exports_become_function_nodes(ts_scip_result):
+    """`export const fn = (...) => ...` exports must become Function nodes,
+    while plain `export const VERSION = "1.0.0"` must not. The discriminator is
+    the `=>` in SymbolInformation.documentation (scip.py:_ARROW_FN_DOC_RE)."""
+    by_name = {n["name"]: n for n in ts_scip_result.nodes}
+    assert by_name.get("formatName", {}).get("label") == "Function", \
+        "arrow-fn `formatName` should be a Function node"
+    assert by_name.get("sum", {}).get("label") == "Function", \
+        "arrow-fn `sum` should be a Function node"
+    assert by_name.get("logName", {}).get("label") == "Function", \
+        "regular `function logName` must still resolve"
+    # Plain non-function const must NOT have become a node.
+    assert "VERSION" not in by_name, \
+        f"plain const `VERSION` must NOT be labeled as a Function — {by_name.get('VERSION')!r}"
+
+
+# ── Go: chi/gin/stdlib HTTP route detection ─────────────────────────────────
+
+def test_go_parse_yields_function_nodes(go_scip_result):
+    assert go_scip_result is not None
+    names = {n["name"] for n in go_scip_result.nodes}
+    # Top-level functions
+    for expected in ("getUser", "createItem", "healthz", "replaceItem", "formatGreeting"):
+        assert expected in names, f"missing Go function {expected}: {sorted(names)}"
+
+
+def test_go_entry_points_detected(go_scip_result):
+    """chi `r.Get(...)`, gin `r.POST(...)`, chi generic `r.Method(verb, ...)`,
+    and stdlib `http.HandleFunc(...)` should each tag their handler node."""
+    by_name = {n["name"]: n for n in go_scip_result.nodes}
+    assert by_name["getUser"]["http_method"] == "GET"
+    assert by_name["getUser"]["http_path"] == "/users/{id}"
+    assert by_name["createItem"]["http_method"] == "POST"
+    assert by_name["createItem"]["http_path"] == "/items"
+    assert by_name["replaceItem"]["http_method"] == "PUT"
+    assert by_name["replaceItem"]["http_path"] == "/items/{id}"
+    assert by_name["healthz"]["http_method"] == "ANY"
+    assert by_name["healthz"]["http_path"] == "/health"
+    # Non-route function must be untagged.
+    assert by_name["formatGreeting"]["http_method"] == ""
+    assert by_name["formatGreeting"]["http_path"] == ""
+
+
+def test_cross_package_imports_resolve():
+    """In a monorepo, `import { greet } from "../b/src/bar"` in package a must
+    emit a File→File IMPORTS edge to package b's bar.ts — the gap that
+    `_run_per_package`'s global sym_def_path closes."""
+    from orgraph.extract.scip import _collect_global_sym_def_paths, _parse_scip
+
+    jobs = [
+        (MONOREPO_A_SCIP, MONOREPO_FIXTURE_DIR / "packages" / "a"),
+        (MONOREPO_B_SCIP, MONOREPO_FIXTURE_DIR / "packages" / "b"),
+    ]
+    sym_def_global = _collect_global_sym_def_paths(jobs)
+    # b's `greet` definition must appear in the global map.
+    assert any(
+        sym.endswith("/greet().") and "b 0.0.0" in sym
+        for sym in sym_def_global
+    ), f"greet missing from global sym_def_path: {list(sym_def_global)[:5]}"
+
+    # parse package a with the global map — should emit the cross-package edge.
+    result_a = _parse_scip(
+        MONOREPO_A_SCIP,
+        MONOREPO_FIXTURE_DIR,
+        doc_root=MONOREPO_FIXTURE_DIR / "packages" / "a",
+        sym_def_path_global=sym_def_global,
+    )
+    assert result_a is not None
+    imports = [e for e in result_a.edges if e["relation"] == "IMPORTS"]
+    assert imports, "expected at least one IMPORTS edge from package a"
+
+    bar_path = str(MONOREPO_FIXTURE_DIR / "packages" / "b" / "src" / "bar.ts")
+    foo_path = str(MONOREPO_FIXTURE_DIR / "packages" / "a" / "src" / "foo.ts")
+    cross = [e for e in imports if e["src_path"] == foo_path and e["dst_path"] == bar_path]
+    assert cross, (
+        f"expected packages/a/src/foo.ts -> packages/b/src/bar.ts IMPORTS edge; "
+        f"got {[(e['src_path'], e['dst_path']) for e in imports]}"
+    )
+
+
+def test_cross_package_imports_drop_without_global_map():
+    """Regression: the same parse WITHOUT the global map drops the cross-package
+    edge. Proves the global map is what closes the gap, not some other code path."""
+    from orgraph.extract.scip import _parse_scip
+
+    result_a = _parse_scip(
+        MONOREPO_A_SCIP,
+        MONOREPO_FIXTURE_DIR,
+        doc_root=MONOREPO_FIXTURE_DIR / "packages" / "a",
+    )
+    assert result_a is not None
+    bar_path = str(MONOREPO_FIXTURE_DIR / "packages" / "b" / "src" / "bar.ts")
+    foo_path = str(MONOREPO_FIXTURE_DIR / "packages" / "a" / "src" / "foo.ts")
+    cross = [
+        e for e in result_a.edges
+        if e["relation"] == "IMPORTS"
+        and e["src_path"] == foo_path
+        and e["dst_path"] == bar_path
+    ]
+    assert not cross, (
+        "without global sym_def_path, cross-package import should drop — "
+        f"got {cross}"
+    )
+
+
+def test_go_route_collector_ignores_commented_examples(tmp_path):
+    """A commented `// r.Get("/example", h)` must not register a route."""
+    from orgraph.extract.treesitter import TreeSitterExtractor
+    repo = tmp_path / "p"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        "package p\n"
+        "// r.Get(\"/example\", commented)  // documentation example\n"
+        "func live(w, r interface{}) {}\n"
+        "func init() { router.Get(\"/live\", live) }\n",
+        encoding="utf-8",
+    )
+    routes = TreeSitterExtractor(repo).__class__._collect_go_http_routes(
+        TreeSitterExtractor(repo)
+    )
+    assert "live" in routes and routes["live"] == ("GET", "/live")
+    assert "commented" not in routes, f"comment leaked into routes: {routes}"
 
 
 def test_scip_imports_persist_end_to_end(scip_result, tmp_path):

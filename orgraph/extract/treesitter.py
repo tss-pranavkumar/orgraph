@@ -78,6 +78,38 @@ _FASTIFY_HTTP: dict[str, str] = {
     "patch": "PATCH", "delete": "DELETE", "head": "HEAD", "options": "OPTIONS",
 }
 
+# Go HTTP route registrations.
+#   chi:    r.Get("/users/{id}", getUser) / r.Method("POST", "/x", h)
+#   gin:    r.GET("/items", h) / r.Handle("PUT", "/x", h)
+#   echo:   e.GET("/x", h)
+#   stdlib: http.HandleFunc("/x", h)  mux.HandleFunc(...)  mux.Handle("/x", h)
+# Receiver is any identifier — chi/gin code uses r, mux, router, app, srv, etc.
+_GO_METHOD_ROUTE_RE = re.compile(
+    r"\b(?P<recv>[A-Za-z_]\w*)\."
+    r"(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|"
+    r"Get|Post|Put|Patch|Delete|Head|Options|Connect|Trace)\s*\(\s*"
+    r"[\"`](?P<path>[^\"`]+)[\"`]\s*,\s*"
+    r"(?P<handler>[A-Za-z_][\w.]*)",
+)
+# chi's r.Method("POST", "/x", h)  and  gin's r.Handle("POST", "/x", h)
+_GO_GENERIC_METHOD_RE = re.compile(
+    r"\b(?P<recv>[A-Za-z_]\w*)\.(?:Method|Handle)\s*\(\s*"
+    r"[\"`](?P<verb>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)[\"`]\s*,\s*"
+    r"[\"`](?P<path>[^\"`]+)[\"`]\s*,\s*"
+    r"(?P<handler>[A-Za-z_][\w.]*)",
+)
+# stdlib net/http:  http.HandleFunc("/x", h) / mux.HandleFunc(...) / mux.Handle("/x", h)
+_GO_STDLIB_HANDLE_RE = re.compile(
+    r"\b(?P<recv>[A-Za-z_]\w*)\.(?:HandleFunc|Handle)\s*\(\s*"
+    r"[\"`](?P<path>[^\"`]+)[\"`]\s*,\s*"
+    r"(?P<handler>[A-Za-z_][\w.]*)",
+)
+_GO_VERB_NORMALIZE: dict[str, str] = {
+    "GET": "GET", "POST": "POST", "PUT": "PUT", "PATCH": "PATCH",
+    "DELETE": "DELETE", "HEAD": "HEAD", "OPTIONS": "OPTIONS",
+    "CONNECT": "CONNECT", "TRACE": "TRACE",
+}
+
 
 def _walk_code_files(repo_path: Path) -> list[Path]:
     files: list[Path] = []
@@ -142,6 +174,7 @@ class TreeSitterExtractor:
         raw_edges: list[dict] = raw.get("edges", [])
         class_routes = self._collect_falcon_routes()
         fastify_routes = self._collect_fastify_routes()
+        go_routes = self._collect_go_http_routes()
 
         # Build method-node-id → class name from graphify's "method" edges.
         # Graphify emits a "method" edge from the class node to each method node.
@@ -218,6 +251,10 @@ class TreeSitterExtractor:
             elif is_func and lang in {"typescript", "javascript"}:
                 if name in fastify_routes:
                     http_method, http_path = fastify_routes[name]
+            elif is_func and lang == "go":
+                bare = name.split(".")[-1]
+                if bare in go_routes:
+                    http_method, http_path = go_routes[bare]
 
             uid = make_uid(name, abs_path, line_no)
             id_to_uid[n["id"]] = uid
@@ -331,6 +368,59 @@ class TreeSitterExtractor:
                 class_name = match.group("class").split(".")[-1]
                 # prefix is dynamic (e.g. settings.API_PREFIX); record the suffix only
                 routes.setdefault(class_name, "{prefix}" + match.group("path"))
+        return routes
+
+    def _collect_go_http_routes(self) -> dict[str, tuple[str, str]]:
+        """Return bare_handler_name → (HTTP_METHOD, path) for Go HTTP frameworks.
+
+        Recognises chi (`r.Get("/x", h)`, `r.Method("POST", "/x", h)`), gin
+        (`r.GET("/x", h)`, `r.Handle("POST", "/x", h)`), echo, and stdlib
+        `net/http` (`http.HandleFunc("/x", h)`, `mux.Handle("/x", h)`). stdlib
+        routes don't have a verb at registration — they're recorded as `"ANY"`.
+        """
+        routes: dict[str, tuple[str, str]] = {}
+        # Don't collide with Go's own `http` package method names — bag of
+        # receivers that we *won't* treat as route registrars even when they
+        # match the verb-method regex (e.g. `http.Get(url)` is an HTTP client).
+        _NOT_ROUTER = {"http"}
+
+        for path in _walk_code_files(self.repo_path):
+            if path.suffix != ".go":
+                continue
+            source = _read_text(str(path))
+            # Strip Go line comments (`// ...`) so commented-out or documented
+            # route examples don't poison the registry. Block comments are left
+            # alone — they rarely contain ready-to-match registration syntax.
+            source = re.sub(r"//[^\n]*", "", source)
+
+            # generic dispatcher first (more specific) so a matching `Handle`
+            # with a verb doesn't get re-matched as a "method-named" call below.
+            consumed_spans: list[tuple[int, int]] = []
+            for match in _GO_GENERIC_METHOD_RE.finditer(source):
+                handler = match.group("handler").split(".")[-1]
+                routes.setdefault(handler, (_GO_VERB_NORMALIZE[match.group("verb")], match.group("path")))
+                consumed_spans.append(match.span())
+
+            def _consumed(pos: int) -> bool:
+                return any(s <= pos < e for s, e in consumed_spans)
+
+            for match in _GO_METHOD_ROUTE_RE.finditer(source):
+                if _consumed(match.start()):
+                    continue
+                if match.group("recv") in _NOT_ROUTER:
+                    continue
+                method = _GO_VERB_NORMALIZE.get(match.group("method").upper())
+                if not method:
+                    continue
+                handler = match.group("handler").split(".")[-1]
+                routes.setdefault(handler, (method, match.group("path")))
+
+            for match in _GO_STDLIB_HANDLE_RE.finditer(source):
+                if _consumed(match.start()):
+                    continue
+                handler = match.group("handler").split(".")[-1]
+                routes.setdefault(handler, ("ANY", match.group("path")))
+
         return routes
 
     def _collect_fastify_routes(self) -> dict[str, tuple[str, str]]:
