@@ -61,6 +61,23 @@ _CELERY_DISPATCH_RE = re.compile(
     r"\b(?P<target>[A-Za-z_][\w.]*)\s*\.\s*(?P<method>apply_async|delay)\s*\("
 )
 
+# Fastify / Express route registrations:
+#   plugin.get('/path', handler)
+#   plugin.post('/path', { preHandler: [...] }, controller.handler)
+#   app.get('/path', handler)  router.post('/path', handler)  server.delete('/path', h)
+_FASTIFY_ROUTE_RE = re.compile(
+    r"\b(?:plugin|fastify|app|server|router)\."
+    r"(?P<method>get|post|put|patch|delete|head|options)\s*\(\s*"
+    r"['\"`](?P<path>[^'\"`]+)['\"`]\s*"
+    r"(?:,\s*\{[^}]*\})?"   # optional options/schema object
+    r"\s*,\s*(?P<handler>[A-Za-z_][\w.]*)",
+    re.IGNORECASE,
+)
+_FASTIFY_HTTP: dict[str, str] = {
+    "get": "GET", "post": "POST", "put": "PUT",
+    "patch": "PATCH", "delete": "DELETE", "head": "HEAD", "options": "OPTIONS",
+}
+
 
 def _walk_code_files(repo_path: Path) -> list[Path]:
     files: list[Path] = []
@@ -124,6 +141,7 @@ class TreeSitterExtractor:
         raw_nodes: list[dict] = raw.get("nodes", [])
         raw_edges: list[dict] = raw.get("edges", [])
         class_routes = self._collect_falcon_routes()
+        fastify_routes = self._collect_fastify_routes()
 
         # Build method-node-id → class name from graphify's "method" edges.
         # Graphify emits a "method" edge from the class node to each method node.
@@ -197,6 +215,9 @@ class TreeSitterExtractor:
                 if lang == "python" and bare in _FALCON_HTTP:
                     http_method = _FALCON_HTTP[bare]
                     http_path = class_routes.get(class_name, "")
+            elif is_func and lang in {"typescript", "javascript"}:
+                if name in fastify_routes:
+                    http_method, http_path = fastify_routes[name]
 
             uid = make_uid(name, abs_path, line_no)
             id_to_uid[n["id"]] = uid
@@ -310,6 +331,26 @@ class TreeSitterExtractor:
                 class_name = match.group("class").split(".")[-1]
                 # prefix is dynamic (e.g. settings.API_PREFIX); record the suffix only
                 routes.setdefault(class_name, "{prefix}" + match.group("path"))
+        return routes
+
+    def _collect_fastify_routes(self) -> dict[str, tuple[str, str]]:
+        """Return bare_handler_name → (HTTP_METHOD, path) for Fastify/Express routes.
+
+        Scans .ts / .js files for patterns like:
+            plugin.get('/path', controller.handler)
+            plugin.post('/path', { preHandler: [...] }, controller.handler)
+        The handler name is normalised to its bare suffix (after the last dot).
+        """
+        routes: dict[str, tuple[str, str]] = {}
+        for path in _walk_code_files(self.repo_path):
+            if path.suffix not in {".ts", ".tsx", ".js", ".jsx", ".mjs"}:
+                continue
+            source = _read_text(str(path))
+            for match in _FASTIFY_ROUTE_RE.finditer(source):
+                method = _FASTIFY_HTTP[match.group("method").lower()]
+                route_path = match.group("path")
+                handler = match.group("handler").split(".")[-1]  # bare name
+                routes.setdefault(handler, (method, route_path))
         return routes
 
     def _extract_celery_dispatch_edges(self, nodes: list[NodeDict]) -> list[EdgeDict]:
