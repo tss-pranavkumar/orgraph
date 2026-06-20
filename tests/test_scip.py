@@ -26,6 +26,12 @@ MONOREPO_FIXTURE_DIR = (
 MONOREPO_A_SCIP = MONOREPO_FIXTURE_DIR / "a.scip"
 MONOREPO_B_SCIP = MONOREPO_FIXTURE_DIR / "b.scip"
 
+GO_WORKSPACE_DIR = (
+    Path(__file__).parent / "fixtures" / "simple_go_workspace"
+).resolve()
+GO_WORKSPACE_A_SCIP = GO_WORKSPACE_DIR / "a.scip"
+GO_WORKSPACE_B_SCIP = GO_WORKSPACE_DIR / "b.scip"
+
 
 @pytest.fixture(scope="module")
 def scip_result():
@@ -357,6 +363,105 @@ def test_go_route_collector_ignores_commented_examples(tmp_path):
     )
     assert "live" in routes and routes["live"] == ("GET", "/live")
     assert "commented" not in routes, f"comment leaked into routes: {routes}"
+
+
+def test_go_workspace_multi_module_indexing():
+    """`go.work` workspace: each module's scip parsed independently and merged.
+    Without _find_go_modules, scip-go at the workspace root indexes only one
+    module — the rest are invisible. With it, both modules' nodes appear."""
+    from orgraph.extract.scip import _collect_global_sym_def_paths, _parse_scip
+
+    jobs = [
+        (GO_WORKSPACE_A_SCIP, GO_WORKSPACE_DIR / "modules" / "a"),
+        (GO_WORKSPACE_B_SCIP, GO_WORKSPACE_DIR / "modules" / "b"),
+    ]
+    glob = _collect_global_sym_def_paths(jobs)
+    # b's `Greet` must appear in the global map.
+    assert any(
+        "Greet" in sym and sym.endswith(").")
+        for sym in glob
+    ), f"Greet missing: {list(glob)[:5]}"
+
+    result_a = _parse_scip(
+        GO_WORKSPACE_A_SCIP, GO_WORKSPACE_DIR,
+        doc_root=GO_WORKSPACE_DIR / "modules" / "a",
+        sym_def_path_global=glob,
+    )
+    result_b = _parse_scip(
+        GO_WORKSPACE_B_SCIP, GO_WORKSPACE_DIR,
+        doc_root=GO_WORKSPACE_DIR / "modules" / "b",
+    )
+    names_a = {n["name"] for n in result_a.nodes}
+    names_b = {n["name"] for n in result_b.nodes}
+    assert "Shout" in names_a, names_a
+    assert "Greet" in names_b, names_b
+
+
+def test_go_import_block_resolves_cross_module():
+    """Go's `import ( "example.com/b" )` block: the regex extension at
+    scip.py:_IMPORT_LINE_RE recognises the inner quoted lines so Pass 4
+    resolves the cross-module File→File IMPORTS edge."""
+    from orgraph.extract.scip import _collect_global_sym_def_paths, _parse_scip
+
+    jobs = [
+        (GO_WORKSPACE_A_SCIP, GO_WORKSPACE_DIR / "modules" / "a"),
+        (GO_WORKSPACE_B_SCIP, GO_WORKSPACE_DIR / "modules" / "b"),
+    ]
+    glob = _collect_global_sym_def_paths(jobs)
+    result_a = _parse_scip(
+        GO_WORKSPACE_A_SCIP, GO_WORKSPACE_DIR,
+        doc_root=GO_WORKSPACE_DIR / "modules" / "a",
+        sym_def_path_global=glob,
+    )
+    imports = [e for e in result_a.edges if e["relation"] == "IMPORTS"]
+    main_path = str(GO_WORKSPACE_DIR / "modules" / "a" / "main.go")
+    greet_path = str(GO_WORKSPACE_DIR / "modules" / "b" / "greet.go")
+    cross = [
+        e for e in imports
+        if e["src_path"] == main_path and e["dst_path"] == greet_path
+    ]
+    assert cross, (
+        f"expected modules/a/main.go -> modules/b/greet.go IMPORTS edge; "
+        f"got {[(e['src_path'], e['dst_path']) for e in imports]}"
+    )
+
+
+def test_fastapi_route_detection(tmp_path):
+    """FastAPI/APIRouter decorator-style routes become http_method-tagged."""
+    from orgraph.extract.treesitter import TreeSitterExtractor
+    src = (Path(__file__).parent / "fixtures" / "simple_python" / "api.py").read_text()
+    repo = tmp_path / "p"
+    repo.mkdir()
+    (repo / "api.py").write_text(src, encoding="utf-8")
+    routes = TreeSitterExtractor(repo)._collect_python_http_routes()
+
+    assert routes.get("get_item") == ("GET", "/items/{item_id}")
+    assert routes.get("create_item") == ("POST", "/items")
+    assert routes.get("delete_item") == ("DELETE", "/items/{item_id}")
+    assert routes.get("healthz") == ("GET", "/health")
+    # Flask methods=[...] kwarg — first verb wins.
+    assert routes.get("user_route", (None, None))[0] == "POST"
+    assert routes.get("user_route", (None, None))[1] == "/users"
+    # Commented decorator must NOT register.
+    assert "commented_handler" not in routes, routes
+
+
+def test_python_routes_default_to_get_when_methods_omitted(tmp_path):
+    """Flask `@app.route("/x")` (no methods kwarg) defaults to GET."""
+    from orgraph.extract.treesitter import TreeSitterExtractor
+    repo = tmp_path / "p"
+    repo.mkdir()
+    (repo / "app.py").write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "\n"
+        "@app.route('/ping')\n"
+        "def ping():\n"
+        "    return 'pong'\n",
+        encoding="utf-8",
+    )
+    routes = TreeSitterExtractor(repo)._collect_python_http_routes()
+    assert routes.get("ping") == ("GET", "/ping")
 
 
 def test_scip_imports_persist_end_to_end(scip_result, tmp_path):

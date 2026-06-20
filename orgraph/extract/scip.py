@@ -66,9 +66,17 @@ _TS_PKG_PARENTS = frozenset({"packages", "apps", "services", "libs", "modules"})
 # scip-python / scip-typescript do NOT set the SCIP Import symbol-role on import
 # occurrences (verified: only Definition + Read/plain-reference roles appear), so
 # imports are detected by the source line a reference sits on. Covers Python
-# (`import x` / `from x import y`) and TS/JS (`import ... from '...'`,
-# `export ... from '...'`, `require(...)`).
-_IMPORT_LINE_RE = re.compile(r"^\s*(from\s|import\s)|\bfrom\s+['\"]|require\s*\(")
+# (`import x` / `from x import y`), TS/JS (`import ... from '...'`,
+# `export ... from '...'`, `require(...)`), and Go's `import ( ... )` block
+# whose inner lines look like `\t"net/http"` or `\tpkg "github.com/foo/bar"`.
+_IMPORT_LINE_RE = re.compile(
+    r"^\s*(from\s|import\s)"
+    r"|\bfrom\s+['\"]"
+    r"|require\s*\("
+    # Go import-block inner line: optional alias + quoted path + EOL anchor so we
+    # don't match incidental quoted strings appearing mid-expression elsewhere.
+    r"|^\s*(?:[A-Za-z_][\w]*\s+|\.\s+|_\s+)?[\"`][^\"`]+[\"`]\s*$"
+)
 
 
 def _detect_primary_lang(repo_path: Path) -> str | None:
@@ -224,6 +232,35 @@ def _find_ts_packages(repo_path: Path) -> list[Path]:
     return pkgs
 
 
+def _find_go_modules(repo_path: Path) -> list[Path]:
+    """Find every Go module root in a `go.work` workspace / multi-module repo.
+
+    Every directory containing a `go.mod` is its own module; unlike TS workspace
+    layouts, Go modules can live anywhere (`grpc/example1/go.mod`,
+    `services/auth/go.mod`, etc.), so the search is repo-wide. Returns absolute
+    directories deduped on resolved path. The repo root is *included* when it
+    has its own `go.mod` AND there's at least one sub-module — `_run_per_package`
+    needs every module covered, including the root.
+    """
+    mods: list[Path] = []
+    seen: set[Path] = set()
+    root = repo_path.resolve()
+    has_sub = False
+    for gm in repo_path.rglob("go.mod"):
+        if any(part in _IGNORED_DIRS for part in gm.parts):
+            continue
+        mod_dir = gm.parent.resolve()
+        if mod_dir != root:
+            has_sub = True
+        if mod_dir in seen:
+            continue
+        seen.add(mod_dir)
+        mods.append(mod_dir)
+    if not has_sub:
+        return []
+    return mods
+
+
 class ScipExtractor:
     """Runs SCIP on a repo and returns an ExtractionResult. Returns None if unavailable."""
 
@@ -241,15 +278,22 @@ class ScipExtractor:
 
         self.scratch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Monorepo path: scip-typescript at a workspace root indexes nothing
-        # useful. Run per-package and merge.
+        # Monorepo / multi-module path: scip-typescript at a workspace root
+        # indexes nothing useful, and scip-go at the root of a `go.work` repo
+        # only sees the root module. Run per-package and merge.
         if binary == "scip-typescript":
             pkgs = _find_ts_packages(self.repo_path)
             if pkgs:
-                merged = self._run_per_package(pkgs, binary)
+                merged = self._run_per_package(pkgs, binary, lang)
                 if merged and merged.nodes:
                     return merged
                 # fall through to root run as a last resort
+        elif binary == "scip-go":
+            mods = _find_go_modules(self.repo_path)
+            if mods:
+                merged = self._run_per_package(mods, binary, lang)
+                if merged and merged.nodes:
+                    return merged
 
         out_file = self.scratch_dir / "index.scip"
 
@@ -285,36 +329,43 @@ class ScipExtractor:
 
         return result
 
-    def _run_per_package(self, pkgs: list[Path], binary: str) -> ExtractionResult | None:
-        """Run scip-typescript inside each sub-package, parse and merge results.
+    def _run_per_package(self, pkgs: list[Path], binary: str, lang: str) -> ExtractionResult | None:
+        """Run scip-<lang> inside each sub-package/module, parse and merge.
 
         Two passes over each sub-package's scip:
-          1. Run scip-typescript inside the package, then a CHEAP pre-sweep of
+          1. Run scip-<lang> inside the package, then a CHEAP pre-sweep of
              definition occurrences to populate a global `sym_def_path` map
              (scip symbol → abs file path) — this is what makes cross-package
              IMPORTS edges resolve.
           2. Full `_parse_scip` with that global map plumbed in, so Pass 4 can
              find the defining file of a symbol that was imported from another
-             sub-package.
+             sub-package / module.
+
+        TS-specific path: `_augmented_tsconfig` temporarily injects cross-package
+        `paths` aliases. Go doesn't need it (go.mod-based resolution is enough).
         """
         merged_nodes: list[NodeDict] = []
         merged_edges: list[EdgeDict] = []
         seen_uids: set[str] = set()
         ok = 0
 
-        # Synthesize cross-package `paths` aliases so scip-typescript resolves
+        # TS-only: synthesize cross-package `paths` so scip-typescript resolves
         # workspace imports to package sources (vs missing/unbuilt `dist/`).
-        workspace_paths = _workspace_pkg_sources(pkgs)
+        workspace_paths = (
+            _workspace_pkg_sources(pkgs) if binary == "scip-typescript" else {}
+        )
 
         # ── Pass A: run scip in each sub-package, collect definition paths ────
         scip_jobs: list[tuple[Path, Path]] = []  # (scip_file, doc_root=pkg_dir)
         for i, pkg_dir in enumerate(pkgs):
             out_file = self.scratch_dir / f"index-{i}.scip"
+            cmd = _build_command(lang, binary, pkg_dir, out_file, self.scratch_dir)
+            if not cmd:
+                continue
             try:
                 with _augmented_tsconfig(pkg_dir, workspace_paths):
                     proc = subprocess.run(
-                        [binary, "index", "--output", str(out_file)],
-                        cwd=str(pkg_dir),
+                        cmd, cwd=str(pkg_dir),
                         capture_output=True, text=True, timeout=300,
                     )
                 if proc.returncode != 0 or not out_file.exists():
@@ -488,6 +539,23 @@ def _read_lines(path: Path) -> list[str]:
         return []
 
 
+# scip-go emits a different version segment for cross-module references vs the
+# definition: an import in module a sees `example.com/b . `example.com/b`/`
+# (placeholder `.`) while module b's own definition is
+# `example.com/b a6a7a5c3a1b7 `example.com/b`/` (resolved hash). Same symbol,
+# different string. We normalize to the version-less form so the global
+# sym_def_path map matches across modules. scip-typescript also includes a
+# version (e.g. `npm @tinyhttp/router 2.2.5 ...`); same normalisation works.
+_SCIP_VERSION_SEG_RE = re.compile(
+    r"^(scip-(?:go|typescript|python)\s+\S+\s+\S+\s+)(\S+)(\s)"
+)
+
+
+def _scip_unversioned(sym: str) -> str:
+    """Replace the version segment of a SCIP symbol with `.` for cross-scip match."""
+    return _SCIP_VERSION_SEG_RE.sub(r"\1.\3", sym, count=1)
+
+
 def _collect_global_sym_def_paths(
     scip_jobs: list[tuple[Path, Path]],
 ) -> dict[str, str]:
@@ -520,6 +588,11 @@ def _collect_global_sym_def_paths(
                 if sym.startswith("local ") or not _is_definition(occ):
                     continue
                 out.setdefault(sym, abs_path)
+                # Also store the unversioned form so cross-module references —
+                # which scip-go emits with version=`.` — resolve.
+                u = _scip_unversioned(sym)
+                if u != sym:
+                    out.setdefault(u, abs_path)
     return out
 
 
@@ -561,6 +634,7 @@ def _parse_scip(
     routes = ts._collect_falcon_routes()
     fastify_routes = ts._collect_fastify_routes()
     go_routes = ts._collect_go_http_routes()
+    py_routes = ts._collect_python_http_routes()
 
     # INHERITS relationships still come from SymbolInformation (kind/display_name
     # are empty there, but is_implementation relationships are populated).
@@ -624,6 +698,10 @@ def _parse_scip(
                 bare = name.split(".")[-1]
                 if bare in go_routes:
                     http_method, http_path = go_routes[bare]
+            elif label == "Function" and lang == "python":
+                bare = name.split(".")[-1]
+                if bare in py_routes:
+                    http_method, http_path = py_routes[bare]
 
             uid = make_uid(name, abs_path, line_no)
             uid_map[sym] = uid
@@ -715,9 +793,13 @@ def _parse_scip(
                 continue
             # Prefer this scip's own definition (single-package fast path); fall
             # back to the cross-scip global map when we're inside a monorepo run.
+            # The unversioned-form lookup catches scip-go's cross-module pattern
+            # where ref version is `.` but def has the resolved module hash.
             dst_path = sym_def_path.get(sym)
             if not dst_path and sym_def_path_global is not None:
                 dst_path = sym_def_path_global.get(sym)
+                if not dst_path:
+                    dst_path = sym_def_path_global.get(_scip_unversioned(sym))
             if not dst_path or dst_path == abs_path:
                 continue
             key = (abs_path, dst_path)

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.1.33 - 2026-06-21
+
+Broader head-to-head against GitNexus across 4 third-party repos (`tinyhttp`,
+`chi`, `gin-gonic/examples`, `fastapi`) surfaced four gaps; this release closes
+all four.
+
+### Added
+- **Go multi-module / `go.work` workspaces.** `_find_go_modules` walks
+  `rglob("go.mod")` to discover every module root (modules can live
+  anywhere — `services/auth/`, `cmd/server/`, `grpc/example1/` — unlike TS's
+  conventional `packages/` parents). `_run_per_package` is now language-aware:
+  builds the scip command via `_build_command` (so scip-go's CLI shape
+  `scip-go --output ...` works alongside scip-typescript's
+  `scip-typescript index --output ...`), and only runs `_augmented_tsconfig`
+  for TS. Verified on `gin-gonic/examples`: **83 → 159 nodes / 8 → 18 HTTP
+  handlers**, including handlers from `realtime-chat/` and
+  `websocket/server/` sub-modules that were previously invisible.
+- **scip-go cross-module symbol normalisation** (`_scip_unversioned`,
+  `_SCIP_VERSION_SEG_RE`). scip-go emits the same symbol with different
+  version segments depending on which module's scip you read: a reference
+  from module A uses version `.` (placeholder), while module B's own
+  definition uses the resolved module hash. `_collect_global_sym_def_paths`
+  now stores both the original and the unversioned form; Pass 4's lookup
+  falls back to the unversioned form when an exact match misses. Without
+  this, every cross-module Go IMPORTS edge dropped. Same fix works for
+  scip-typescript / scip-python versioning.
+- **Go `import ( ... )` block IMPORTS.** `_IMPORT_LINE_RE` was extended with
+  a fourth alternation matching bare indented quoted module paths
+  (optionally preceded by a named-import alias like `pkg`, `_`, `.`):
+  `^\s*(?:[A-Za-z_]\w*\s+|\.\s+|_\s+)?["` "]+["` "]\s*$`. Catches
+  `\t"net/http"` and `\tpkg "github.com/foo/bar"` inside `import ( ... )`
+  blocks. End-anchored to avoid matching incidental string literals.
+- **FastAPI / Starlette / APIRouter / Flask HTTP entry-point heuristics.**
+  New `_collect_python_http_routes` in `TreeSitterExtractor`. Two decorator
+  shapes covered:
+  - FastAPI / Starlette / APIRouter — verb-named decorators
+    (`@app.get("/x")`, `@router.post("/y")`). Verb in method name, path in
+    first arg.
+  - Flask — `@app.route("/x", methods=["POST"])`. Path in first arg, verbs
+    in `methods=` kwarg (defaults to `GET` when omitted).
+  Handler binding: scan each `.py` file line-by-line; when a matching
+  decorator is found, look ahead for the next non-decorator non-blank line
+  and pair with its `def NAME(` / `async def NAME(`. `#` line comments are
+  pre-stripped so `# @app.get("/x")` doesn't poison the registry. Wired
+  into both `treesitter._convert` and `scip._parse_scip`. Verified on real
+  `fastapi/fastapi` repo: HTTP handlers detected throughout `docs_src/`.
+- **CLI `path` command** — `find_path` was already in `query.py` and
+  exposed via MCP; the CLI wrapper at `cli.py:488` was correct in source
+  but missing from the installed wheel (same "stale install" pattern hit
+  in 0.1.32 for `query.py`/`schema.py`/`builder.py`). Now reliably ships.
+  `orgraph path Router.all pushMiddleware` returns the shortest call chain
+  between two symbols with file:line per step.
+- **4 new fixtures + tests**: `simple_go_workspace/` (2-module `go.work`
+  with cross-module import + both single-line `import "..."` and block
+  `import ( ... )` forms); `simple_python/api.py` (FastAPI + APIRouter +
+  Flask routes including commented-decorator negative case). 125 tests
+  pass (up from 121).
+
 ## 0.1.32 - 2026-06-21
 
 Close the last gaps blocking competitive parity across Python, TypeScript, and

@@ -104,6 +104,37 @@ _GO_STDLIB_HANDLE_RE = re.compile(
     r"[\"`](?P<path>[^\"`]+)[\"`]\s*,\s*"
     r"(?P<handler>[A-Za-z_][\w.]*)",
 )
+# FastAPI / Starlette / APIRouter decorator routes:
+#   @app.get("/items/{id}")  @router.post("/x")  @api.delete(...)
+# Verb is part of the method name, path is the first arg. Same shape for
+# Starlette (`@app.route` exists too but the verb-named decorators dominate).
+_FASTAPI_ROUTE_RE = re.compile(
+    r"@(?P<receiver>[A-Za-z_]\w*)\."
+    r"(?P<method>get|post|put|patch|delete|head|options|trace|connect)\s*\(\s*"
+    r"[\"'](?P<path>[^\"']+)[\"']",
+    re.IGNORECASE,
+)
+
+# Flask `@app.route` decorator: methods kwarg carries the verbs.
+#   @app.route("/path")                    -> GET (Flask default)
+#   @app.route("/path", methods=["POST"])
+#   @app.route("/path", methods=["GET","PUT"])
+_FLASK_ROUTE_RE = re.compile(
+    r"@(?P<receiver>[A-Za-z_]\w*)\.route\s*\(\s*"
+    r"[\"'](?P<path>[^\"']+)[\"']"
+    r"(?P<rest>[^)]*)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FLASK_METHODS_KW_RE = re.compile(
+    r"methods\s*=\s*\[\s*(?P<verbs>[^\]]+)\]",
+    re.IGNORECASE,
+)
+_FLASK_VERB_LITERAL_RE = re.compile(r"[\"'](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)[\"']", re.IGNORECASE)
+
+# Identify a Python `def NAME(` (or `async def NAME(`) line — used to pair the
+# nearest function below a `@verb(...)` decorator.
+_PY_DEF_LINE_RE = re.compile(r"^\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\s*\(")
+
 _GO_VERB_NORMALIZE: dict[str, str] = {
     "GET": "GET", "POST": "POST", "PUT": "PUT", "PATCH": "PATCH",
     "DELETE": "DELETE", "HEAD": "HEAD", "OPTIONS": "OPTIONS",
@@ -175,6 +206,7 @@ class TreeSitterExtractor:
         class_routes = self._collect_falcon_routes()
         fastify_routes = self._collect_fastify_routes()
         go_routes = self._collect_go_http_routes()
+        py_routes = self._collect_python_http_routes()
 
         # Build method-node-id → class name from graphify's "method" edges.
         # Graphify emits a "method" edge from the class node to each method node.
@@ -248,6 +280,8 @@ class TreeSitterExtractor:
                 if lang == "python" and bare in _FALCON_HTTP:
                     http_method = _FALCON_HTTP[bare]
                     http_path = class_routes.get(class_name, "")
+                elif lang == "python" and bare in py_routes:
+                    http_method, http_path = py_routes[bare]
             elif is_func and lang in {"typescript", "javascript"}:
                 if name in fastify_routes:
                     http_method, http_path = fastify_routes[name]
@@ -255,6 +289,10 @@ class TreeSitterExtractor:
                 bare = name.split(".")[-1]
                 if bare in go_routes:
                     http_method, http_path = go_routes[bare]
+            elif is_func and lang == "python":
+                bare = name.split(".")[-1]
+                if bare in py_routes:
+                    http_method, http_path = py_routes[bare]
 
             uid = make_uid(name, abs_path, line_no)
             id_to_uid[n["id"]] = uid
@@ -368,6 +406,65 @@ class TreeSitterExtractor:
                 class_name = match.group("class").split(".")[-1]
                 # prefix is dynamic (e.g. settings.API_PREFIX); record the suffix only
                 routes.setdefault(class_name, "{prefix}" + match.group("path"))
+        return routes
+
+    def _collect_python_http_routes(self) -> dict[str, tuple[str, str]]:
+        """Return bare_handler_name → (HTTP_METHOD, path) for FastAPI/Starlette/Flask.
+
+        Scans `.py` files for two decorator shapes:
+          - `@app.get("/x")` / `@router.post("/y")` (FastAPI, Starlette, APIRouter)
+          - `@app.route("/z", methods=["POST"])` (Flask; defaults to GET if no kwarg)
+
+        The handler name is taken from the next non-blank `def NAME(` or
+        `async def NAME(` line below the matching decorator. First decorator
+        wins via `setdefault` — a handler can be tagged with only one method,
+        consistent with the other detectors.
+        """
+        routes: dict[str, tuple[str, str]] = {}
+        for path in _walk_code_files(self.repo_path):
+            if path.suffix != ".py":
+                continue
+            source = _read_text(str(path))
+            # Strip `#` line comments so a commented-out @app.get example doesn't
+            # poison the registry. Triple-quoted strings remain — false positives
+            # there are rare and self-resolving (no def below them).
+            scrubbed = re.sub(r"#[^\n]*", "", source)
+            lines = scrubbed.splitlines()
+
+            def _handler_below(idx: int) -> str | None:
+                # Walk forward past additional decorators / blank lines to find
+                # the function definition the decorator applies to.
+                for j in range(idx + 1, min(idx + 12, len(lines))):
+                    s = lines[j].strip()
+                    if not s or s.startswith("@"):
+                        continue
+                    m = _PY_DEF_LINE_RE.match(lines[j])
+                    return m.group("name") if m else None
+                return None
+
+            for i, line in enumerate(lines):
+                m = _FASTAPI_ROUTE_RE.search(line)
+                if m and m.group("method").lower() in _FASTIFY_HTTP:
+                    handler = _handler_below(i)
+                    if handler:
+                        routes.setdefault(
+                            handler,
+                            (_FASTIFY_HTTP[m.group("method").lower()], m.group("path")),
+                        )
+                    continue
+                m = _FLASK_ROUTE_RE.search(line)
+                if m:
+                    handler = _handler_below(i)
+                    if not handler:
+                        continue
+                    verbs: list[str] = []
+                    mk = _FLASK_METHODS_KW_RE.search(m.group("rest") or "")
+                    if mk:
+                        for vm in _FLASK_VERB_LITERAL_RE.finditer(mk.group("verbs")):
+                            verbs.append(vm.group(1).upper())
+                    if not verbs:
+                        verbs = ["GET"]   # Flask's default when methods is omitted
+                    routes.setdefault(handler, (verbs[0], m.group("path")))
         return routes
 
     def _collect_go_http_routes(self) -> dict[str, tuple[str, str]]:
