@@ -266,6 +266,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
     from orgraph.extract.treesitter import TreeSitterExtractor
     ts = TreeSitterExtractor(repo_path=repo_path)
     routes = ts._collect_falcon_routes()
+    fastify_routes = ts._collect_fastify_routes()
 
     # INHERITS relationships still come from SymbolInformation (kind/display_name
     # are empty there, but is_implementation relationships are populated).
@@ -311,7 +312,7 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
             name = _name_from_symbol(sym)
 
             # Qualify methods as ClassName.method (matches tree-sitter naming) and
-            # tag Falcon HTTP handlers.
+            # tag Falcon/Fastify HTTP handlers.
             http_method = http_path = ""
             class_name, _, member = sym.split("/")[-1].partition("#")
             if member and class_name:  # a member of the class, not the class itself
@@ -319,6 +320,9 @@ def _parse_scip(index_path: Path, repo_path: Path) -> ExtractionResult | None:
                 if name.rsplit(".", 1)[-1] in _FALCON_HTTP:
                     http_method = _FALCON_HTTP[name.rsplit(".", 1)[-1]]
                     http_path = routes.get(class_name, "")
+            elif label == "Function" and lang in ("typescript", "javascript"):
+                if name in fastify_routes:
+                    http_method, http_path = fastify_routes[name]
 
             uid = make_uid(name, abs_path, line_no)
             uid_map[sym] = uid
