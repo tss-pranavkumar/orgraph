@@ -1,0 +1,625 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>orgraph</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="/graphology.umd.min.js"></script>
+<script src="/sigma.min.js"></script>
+<script src="/graphology-layout-forceatlas2.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0e0e16;--bg2:#12121c;--bg3:#1a1a2e;--bg4:#22223a;
+  --border:#2a2a42;--text:#e2e2f0;--text2:#9090b8;--text3:#5a5a80;
+  --accent:#7c3aed;--accent2:#5b21b6;
+  --fn:#10b981;--cls:#f59e0b;--iface:#ec4899;--struct:#f97316;--enum:#a855f7;--file:#3b82f6;--var:#64748b;
+  --calls:#7c3aed;--imports:#1d4ed8;--contains:#2d8a4e;--inherits:#c2410c;--implements:#be185d;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.5 system-ui,sans-serif}
+#app{display:grid;grid-template-columns:280px 0 1fr;grid-template-rows:1fr;height:100vh;grid-template-areas:"sidebar inspector graph"}
+#app.insp-open{grid-template-columns:280px minmax(420px,580px) 1fr}
+
+#sidebar{grid-area:sidebar;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--bg2);overflow:hidden}
+#sidebar-head{padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0}
+#sidebar-head h1{font-size:14px;font-weight:700;letter-spacing:.04em;color:var(--text)}
+#sidebar-head h1 span{color:var(--accent)}
+#stats-bar{font-size:11px;color:var(--text3);margin-top:3px;line-height:1.4}
+#search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative}
+#search{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;outline:none}
+#search:focus{border-color:var(--accent)}
+#search-results{position:absolute;left:12px;right:12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;top:calc(100% - 4px);z-index:100;max-height:220px;overflow-y:auto;display:none}
+#search-results.show{display:block}
+.sr-item{padding:7px 10px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px}
+.sr-item:hover{background:var(--bg4)}
+#tree-wrap{flex:1;overflow-y:auto;padding:6px 0}
+.dir-row{display:flex;align-items:center;gap:5px;padding:3px 8px;cursor:pointer;user-select:none;font-size:11px;color:var(--text2)}
+.dir-row:hover{background:var(--bg3)}
+.dir-row .arrow{transition:transform .15s;font-size:10px;color:var(--text3)}
+.dir-row.open .arrow{transform:rotate(90deg)}
+.dir-children{display:none;padding-left:12px}
+.dir-row.open+.dir-children{display:block}
+.file-row{display:flex;align-items:center;gap:6px;padding:3px 8px 3px 16px;cursor:pointer;font-size:11px;color:var(--text2);border-radius:4px;margin:1px 4px}
+.file-row:hover,.file-row.active{background:var(--bg3);color:var(--text)}
+.file-row .sym-ct{margin-left:auto;font-size:10px;color:var(--text3);background:var(--bg4);padding:1px 5px;border-radius:10px}
+
+#inspector{grid-area:inspector;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--bg2);overflow:hidden}
+#insp-head{padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:8px;min-height:44px}
+#insp-title{font-size:13px;font-weight:600;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#insp-close{background:none;border:none;color:var(--text3);cursor:pointer;padding:2px 8px;border-radius:4px;font-size:16px;line-height:1}
+#insp-close:hover{color:var(--text);background:var(--bg4)}
+#insp-tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0}
+.itab{padding:8px 14px;font-size:12px;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;background:none;border-top:none;border-left:none;border-right:none}
+.itab.active{color:var(--text);border-bottom-color:var(--accent)}
+.itab:hover:not(.active){color:var(--text2)}
+#insp-body{flex:1;overflow-y:auto;overflow-x:hidden}
+.code-wrap{display:flex;font-family:ui-monospace,'Cascadia Code',monospace;font-size:12px;line-height:1.6}
+.gutter{padding:8px 8px 8px 12px;color:var(--text3);user-select:none;text-align:right;min-width:42px;background:var(--bg3);border-right:1px solid var(--border);flex-shrink:0;font-family:ui-monospace,monospace;font-size:12px;line-height:1.6}
+.code{flex:1;min-width:0;overflow-x:auto;white-space:pre;padding:8px 12px;color:var(--text)}
+.hl-kw{color:#79c0ff}.hl-str{color:#a5d6ff}.hl-cmt{color:#6e7681;font-style:italic}.hl-num{color:#f2cc60}.hl-dec{color:#d2a8ff}
+.sym-list{border-top:1px solid var(--border);padding:8px 0}
+.sym-row{display:flex;align-items:center;gap:8px;padding:5px 14px;cursor:pointer;font-size:12px}
+.sym-row:hover{background:var(--bg3)}
+.sym-row .sym-ln{color:var(--text3);font-size:11px;margin-left:auto;font-family:ui-monospace,monospace}
+.node-info{padding:14px}
+.ni-name{font-size:15px;font-weight:700;margin-bottom:4px;word-break:break-all}
+.ni-meta{font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6}
+.ni-sec{margin-bottom:16px}
+.ni-sec-title{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.ni-item{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;cursor:pointer;flex-wrap:wrap}
+.ni-item:hover{color:var(--accent)}
+.ni-item .ni-file{font-size:11px;color:var(--text3);font-family:ui-monospace,monospace;margin-left:auto}
+.code-snip{background:var(--bg3);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-top:6px}
+.code-snip pre{font-family:ui-monospace,monospace;font-size:11px;padding:10px 12px;overflow-x:auto;white-space:pre;color:var(--text);line-height:1.5}
+
+#graph{grid-area:graph;position:relative;overflow:hidden;background:var(--bg)}
+#sigma-container{width:100%;height:100%}
+#loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none;background:var(--bg)}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading-txt{font-size:13px;color:var(--text3)}
+#layoutbar{position:absolute;top:12px;left:12px;display:flex;gap:6px;pointer-events:auto;z-index:10}
+.lbtn{background:rgba(18,18,28,.85);border:1px solid var(--border);color:var(--text2);padding:5px 12px;border-radius:20px;font-size:11px;cursor:pointer;transition:all .15s;backdrop-filter:blur(4px)}
+.lbtn:hover,.lbtn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+#isobar{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(18,18,28,.9);border:1px solid var(--accent);color:var(--text2);padding:5px 14px;border-radius:20px;font-size:11px;display:none;pointer-events:auto;gap:10px;align-items:center;z-index:10;backdrop-filter:blur(4px)}
+#isobar.show{display:flex}
+#isobar button{background:none;border:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0}
+#ep-bar{position:absolute;top:12px;right:12px;display:flex;gap:6px;pointer-events:auto;z-index:10}
+.epbtn{background:rgba(18,18,28,.85);border:1px solid var(--border);color:var(--text2);padding:5px 12px;border-radius:20px;font-size:11px;cursor:pointer;transition:all .15s;backdrop-filter:blur(4px)}
+.epbtn:hover{background:var(--bg4);color:var(--text)}
+.epbtn.on{background:rgba(240,208,80,.15);border-color:#f0d050;color:#f0d050}
+#legend{position:absolute;bottom:12px;left:12px;background:rgba(14,14,22,.88);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:11px;pointer-events:none;backdrop-filter:blur(4px);z-index:10}
+.lg-title{color:var(--text3);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;font-size:10px}
+.lg-row{display:flex;align-items:center;gap:7px;margin-bottom:4px}
+.lg-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.lg-line{width:16px;height:2px;flex-shrink:0;border-radius:1px}
+.lg-label{color:var(--text2)}
+.kb{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;font-size:10px;font-weight:700;flex-shrink:0}
+.kFunction{background:rgba(16,185,129,.2);color:var(--fn)}
+.kClass{background:rgba(245,158,11,.2);color:var(--cls)}
+.kInterface{background:rgba(236,72,153,.2);color:var(--iface)}
+.kStruct{background:rgba(249,115,22,.2);color:var(--struct)}
+.kEnum{background:rgba(168,85,247,.2);color:var(--enum)}
+.kFile{background:rgba(59,130,246,.2);color:var(--file)}
+.kVariable{background:rgba(100,116,139,.2);color:var(--var)}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+
+<div id="app">
+  <div id="sidebar">
+    <div id="sidebar-head">
+      <h1>org<span>graph</span></h1>
+      <div id="stats-bar">loading…</div>
+    </div>
+    <div id="search-wrap">
+      <input id="search" placeholder="Search symbols…" autocomplete="off">
+      <div id="search-results"></div>
+    </div>
+    <div id="tree-wrap"></div>
+  </div>
+
+  <div id="inspector">
+    <div id="insp-head">
+      <span id="insp-title">Select a file or node</span>
+      <button id="insp-close" title="Close">✕</button>
+    </div>
+    <div id="insp-tabs">
+      <button class="itab active" data-tab="code">Source</button>
+      <button class="itab" data-tab="info">Details</button>
+    </div>
+    <div id="insp-body">
+      <div id="tab-code"></div>
+      <div id="tab-info" style="display:none"></div>
+    </div>
+  </div>
+
+  <div id="graph">
+    <div id="sigma-container"></div>
+    <div id="loading">
+      <div class="spinner"></div>
+      <div id="loading-txt">Loading graph…</div>
+    </div>
+    <div id="layoutbar">
+      <button class="lbtn active" data-mode="force">Force</button>
+      <button class="lbtn" data-mode="tree">Tree</button>
+      <button class="lbtn" data-mode="circles">Circles</button>
+    </div>
+    <div id="isobar"><span id="iso-label">isolated</span> <button onclick="fullGraph()">show all</button></div>
+    <div id="ep-bar">
+      <button class="epbtn" id="ep-toggle">Entry points</button>
+    </div>
+    <div id="legend">
+      <div class="lg-title">Nodes</div>
+      <div class="lg-row"><span class="lg-dot" style="background:var(--fn)"></span><span class="lg-label">Function</span></div>
+      <div class="lg-row"><span class="lg-dot" style="background:var(--cls)"></span><span class="lg-label">Class</span></div>
+      <div class="lg-row"><span class="lg-dot" style="background:var(--iface)"></span><span class="lg-label">Interface</span></div>
+      <div class="lg-row"><span class="lg-dot" style="background:var(--struct)"></span><span class="lg-label">Struct / Enum</span></div>
+      <div class="lg-row"><span class="lg-dot" style="background:var(--file)"></span><span class="lg-label">File</span></div>
+      <div class="lg-title" style="margin-top:8px">Edges</div>
+      <div class="lg-row"><span class="lg-line" style="background:var(--calls)"></span><span class="lg-label">CALLS</span></div>
+      <div class="lg-row"><span class="lg-line" style="background:var(--imports)"></span><span class="lg-label">IMPORTS</span></div>
+      <div class="lg-row"><span class="lg-line" style="background:var(--contains)"></span><span class="lg-label">CONTAINS</span></div>
+      <div class="lg-row"><span class="lg-line" style="background:var(--inherits)"></span><span class="lg-label">INHERITS</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const NODE_COLOR={Function:'#10b981',Class:'#f59e0b',Interface:'#ec4899',Struct:'#f97316',Enum:'#a855f7',File:'#3b82f6',Variable:'#64748b'};
+const EDGE_COLOR={CALLS:'#7c3aed',IMPORTS:'#1d4ed8',CONTAINS:'#2d8a4e',INHERITS:'#c2410c',IMPLEMENTS:'#be185d'};
+const KIND_GLYPH={Function:'ƒ',Class:'C',Interface:'I',Struct:'S',Enum:'E',File:'f',Variable:'v'};
+const BG_R=14,BG_G=14,BG_B=22;
+
+let GRAPH=null,sigmaGraph=null,renderer=null;
+let selectedNode=null,hoveredNode=null,neighborSet=new Set();
+let epHighlight=new Set(),epOn=false,EP_DATA=null;
+let layoutMode='force',layoutRunning=false,layoutTimer=null;
+let isoActive=false,isoNodes=new Set();
+let activeTab='code';
+
+function nodeBaseColor(n){
+  if(n.http_method&&n.http_method!=='')return'#f0d050';
+  return NODE_COLOR[n.kind]||'#4a6044';
+}
+function nodeBaseSize(n){
+  const base=n.kind==='File'?3.5:n.kind==='Function'?3:4;
+  return base+Math.sqrt(Math.max(0,n.indegree||0))*1.2;
+}
+
+// blend hex color toward dark bg at `t` (0=dark, 1=original)
+function blendColor(hex,t){
+  const h=hex.replace('#','');
+  const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
+  const nr=Math.round(BG_R+(r-BG_R)*t);
+  const ng=Math.round(BG_G+(g-BG_G)*t);
+  const nb=Math.round(BG_B+(b-BG_B)*t);
+  return`rgb(${nr},${ng},${nb})`;
+}
+
+function buildSigmaGraph(data){
+  const g=new graphology.Graph({multi:false,allowSelfLoops:false});
+  for(const n of data.nodes){
+    if(g.hasNode(n.id))continue;
+    const col=nodeBaseColor(n);
+    const sz=nodeBaseSize(n);
+    g.addNode(n.id,{
+      label:n.name,color:col,size:sz,
+      x:(Math.random()-.5)*1000,y:(Math.random()-.5)*1000,
+      kind:n.kind,file:n.file,line:n.line,lang:n.lang,
+      community:n.community,http_method:n.http_method,http_path:n.http_path,
+      indegree:n.indegree||0,origColor:col,origSize:sz,
+    });
+  }
+  const seen=new Set();
+  for(const l of data.links){
+    const k=l.source+'→'+l.target+':'+l.relation;
+    if(seen.has(k))continue; seen.add(k);
+    if(!g.hasNode(l.source)||!g.hasNode(l.target))continue;
+    try{
+      g.addEdge(l.source,l.target,{
+        color:EDGE_COLOR[l.relation]||'#444',
+        size:l.relation==='CONTAINS'?.4:l.relation==='CALLS'?1.1:.7,
+        relation:l.relation,
+      });
+    }catch(e){}
+  }
+  return g;
+}
+
+function nodeReducer(node,data){
+  const res={...data};
+  const active=selectedNode||hoveredNode;
+  if(active){
+    if(node===selectedNode){res.color='#ffffff';res.size=data.origSize*1.8;res.zIndex=10;}
+    else if(neighborSet.has(node)||node===hoveredNode){res.color=data.origColor;res.size=data.origSize*1.3;res.zIndex=5;}
+    else{res.color=blendColor(data.origColor,.1);res.size=data.origSize*.4;res.zIndex=0;res.label='';}
+  }
+  if(epOn&&epHighlight.has(node)){res.color='#f0d050';res.size=(res.size||data.origSize)*1.5;res.zIndex=8;}
+  if(isoActive&&!isoNodes.has(node)){res.hidden=true;}
+  return res;
+}
+
+function edgeReducer(edge,data){
+  const res={...data};
+  if(isoActive){
+    const s=sigmaGraph.source(edge),t=sigmaGraph.target(edge);
+    if(!isoNodes.has(s)||!isoNodes.has(t)){res.hidden=true;return res;}
+  }
+  const active=selectedNode||hoveredNode;
+  if(active){
+    const s=sigmaGraph.source(edge),t=sigmaGraph.target(edge);
+    if(s!==active&&t!==active){res.color='rgba(30,30,60,.25)';res.size=data.size*.25;}
+    else{res.size=data.size*2.5;}
+  }
+  return res;
+}
+
+function initSigma(g){
+  if(renderer){renderer.kill();renderer=null;}
+  const container=document.getElementById('sigma-container');
+  renderer=new Sigma(g,container,{
+    renderEdgeLabels:false,labelDensity:.12,labelGridCellSize:80,
+    labelFont:'system-ui,sans-serif',labelSize:11,labelWeight:'400',
+    labelColor:{color:'#9090b8'},defaultEdgeColor:'#333',defaultNodeColor:'#4a6044',
+    hideEdgesOnMove:true,minCameraRatio:.002,maxCameraRatio:50,
+    nodeReducer,edgeReducer,
+  });
+  renderer.on('clickNode',({node})=>{
+    const attrs=g.getNodeAttributes(node);
+    if(attrs.kind==='File'){showFileContent(attrs.file);}
+    else{selectNode(node);}
+  });
+  renderer.on('clickStage',()=>{fullGraph();});
+  renderer.on('enterNode',({node})=>{hoveredNode=node;renderer.refresh();});
+  renderer.on('leaveNode',()=>{hoveredNode=null;renderer.refresh();});
+}
+
+// FA2 layout
+function fa2Cfg(n){
+  if(n<500) return{gravity:.8,scalingRatio:15,slowDown:1,barnesHutOptimize:false};
+  if(n<2000)return{gravity:.5,scalingRatio:30,slowDown:2,barnesHutOptimize:true,barnesHutTheta:.6};
+  if(n<10000)return{gravity:.3,scalingRatio:60,slowDown:3,barnesHutOptimize:true,barnesHutTheta:.7};
+  return       {gravity:.15,scalingRatio:100,slowDown:5,barnesHutOptimize:true,barnesHutTheta:.8};
+}
+function stopLayout(){layoutRunning=false;if(layoutTimer){cancelAnimationFrame(layoutTimer);layoutTimer=null;}}
+function startFA2(){
+  if(!sigmaGraph)return;
+  stopLayout();
+  const n=sigmaGraph.order,cfg=fa2Cfg(n);
+  const batch=n<500?50:n<2000?20:10;
+  const maxBatch=n<500?80:n<2000?120:200;
+  let i=0;layoutRunning=true;
+  function tick(){
+    if(!layoutRunning||i>=maxBatch){layoutRunning=false;return;}
+    GraphologyFA2.assign(sigmaGraph,{iterations:batch,settings:cfg});
+    if(renderer)renderer.refresh();i++;
+    layoutTimer=requestAnimationFrame(tick);
+  }
+  layoutTimer=requestAnimationFrame(tick);
+}
+
+function assignTreeLayout(g){
+  stopLayout();
+  const LAYER={File:1,Class:2,Interface:2,Struct:2,Enum:2,Function:3,Variable:3};
+  const bands=[[],[],[],[],[]];
+  g.forEachNode((n,a)=>bands[Math.min(LAYER[a.kind]??2,4)].push(n));
+  const W=1400,H=1000;
+  bands.forEach((nodes,li)=>{
+    const y=(li/3)*H-H/2;
+    nodes.forEach((n,i)=>{
+      const x=nodes.length>1?(i/(nodes.length-1)-.5)*W:0;
+      g.setNodeAttribute(n,'x',x+(Math.random()-.5)*40);
+      g.setNodeAttribute(n,'y',y+(Math.random()-.5)*80);
+    });
+  });
+  if(renderer)renderer.refresh();
+  const cfg=fa2Cfg(g.order);cfg.gravity=.5;cfg.scalingRatio=20;
+  let i=0;layoutRunning=true;
+  function tick(){if(!layoutRunning||i++>=40){layoutRunning=false;return;}
+    GraphologyFA2.assign(g,{iterations:8,settings:cfg});if(renderer)renderer.refresh();
+    layoutTimer=requestAnimationFrame(tick);}
+  layoutTimer=requestAnimationFrame(tick);
+}
+
+function assignCirclesLayout(g){
+  stopLayout();
+  const RINGS=[0,180,380,650];
+  const LAYER={File:1,Class:2,Interface:2,Struct:2,Enum:2,Function:3,Variable:3};
+  const rings=[[],[],[],[]];
+  g.forEachNode((n,a)=>rings[Math.min(LAYER[a.kind]??2,RINGS.length-1)].push(n));
+  rings.forEach((nodes,ri)=>{
+    const rad=RINGS[ri];
+    nodes.forEach((n,i)=>{
+      const angle=(2*Math.PI*i)/Math.max(1,nodes.length);
+      g.setNodeAttribute(n,'x',rad*Math.cos(angle)+(Math.random()-.5)*25);
+      g.setNodeAttribute(n,'y',rad*Math.sin(angle)+(Math.random()-.5)*25);
+    });
+  });
+  if(renderer)renderer.refresh();
+  const cfg=fa2Cfg(g.order);cfg.gravity=.3;cfg.scalingRatio=10;
+  let i=0;layoutRunning=true;
+  function tick(){if(!layoutRunning||i++>=30){layoutRunning=false;return;}
+    GraphologyFA2.assign(g,{iterations:6,settings:cfg});if(renderer)renderer.refresh();
+    layoutTimer=requestAnimationFrame(tick);}
+  layoutTimer=requestAnimationFrame(tick);
+}
+
+function applyLayout(mode){
+  layoutMode=mode;
+  document.querySelectorAll('.lbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));
+  if(!sigmaGraph)return;
+  if(mode==='force')startFA2();
+  else if(mode==='tree')assignTreeLayout(sigmaGraph);
+  else assignCirclesLayout(sigmaGraph);
+}
+
+function selectNode(id,opts={}){
+  if(!sigmaGraph||!sigmaGraph.hasNode(id))return;
+  selectedNode=id;neighborSet=new Set();
+  sigmaGraph.forEachNeighbor(id,n=>neighborSet.add(n));
+  // Always isolate on explicit node click — shows 1-hop neighborhood clearly
+  isoActive=true;isoNodes=new Set([id,...neighborSet]);
+  document.getElementById('isobar').classList.add('show');
+  document.getElementById('iso-label').textContent=`${isoNodes.size} nodes`;
+  if(renderer){
+    renderer.refresh();
+    if(!opts.keepFile)showNodeDetail(id);
+    _cameraFitNodes(isoNodes);
+  }
+}
+
+// Isolate all nodes belonging to a file + their direct neighbors
+function isolateByFile(relPath){
+  if(!sigmaGraph||!renderer)return;
+  const fileNodes=new Set();
+  // Find the File node by relative path (File.attrs.file is the relative path)
+  sigmaGraph.forEachNode((n,a)=>{
+    if(a.kind==='File'&&a.file===relPath)fileNodes.add(n);
+  });
+  // Always find symbol nodes by basename (symbol.attrs.file stores just the filename)
+  const fname=relPath.split('/').pop();
+  sigmaGraph.forEachNode((n,a)=>{if(a.kind!=='File'&&a.file===fname)fileNodes.add(n);});
+  if(!fileNodes.size)return;
+  // Expand to include 1-hop neighbors so call edges stay visible
+  const expanded=new Set(fileNodes);
+  fileNodes.forEach(n=>sigmaGraph.forEachNeighbor(n,nb=>expanded.add(nb)));
+  isoActive=true;isoNodes=expanded;selectedNode=null;neighborSet.clear();
+  document.getElementById('isobar').classList.add('show');
+  document.getElementById('iso-label').textContent=
+    `${fileNodes.size} node${fileNodes.size!==1?'s':''} in ${relPath.split('/').pop()}`;
+  renderer.refresh();
+  // Camera: convert to Sigma's normalized space, then fit the bounding box
+  _cameraFitNodes(fileNodes);
+}
+
+// Fit camera to a set of node IDs using Sigma's normalization function
+function _cameraFitNodes(nodeSet){
+  if(!renderer||!nodeSet.size)return;
+  const nfn=renderer.normalizationFunction;
+  if(!nfn)return;
+  let nxs=[],nys=[];
+  nodeSet.forEach(n=>{
+    const a=sigmaGraph.getNodeAttributes(n);
+    if(a.x!=null){const nc=nfn({x:a.x,y:a.y});nxs.push(nc.x);nys.push(nc.y);}
+  });
+  if(!nxs.length)return;
+  const cx=nxs.reduce((a,b)=>a+b,0)/nxs.length;
+  const cy=nys.reduce((a,b)=>a+b,0)/nys.length;
+  const minX=Math.min(...nxs),maxX=Math.max(...nxs);
+  const minY=Math.min(...nys),maxY=Math.max(...nys);
+  const spread=Math.max(maxX-minX,maxY-minY,.01);
+  // ratio = spread * 2 shows the cluster filling ~half the viewport with padding
+  const ratio=Math.max(.02,Math.min(1.5,spread*2));
+  renderer.getCamera().animate({x:cx,y:cy,ratio},{duration:400});
+}
+
+function fullGraph(){
+  isoActive=false;isoNodes.clear();selectedNode=null;neighborSet.clear();hoveredNode=null;
+  document.getElementById('isobar').classList.remove('show');
+  if(renderer)renderer.refresh();
+}
+
+// Inspector
+function openInspector(){document.getElementById('app').classList.add('insp-open');setTimeout(()=>renderer&&renderer.refresh(),100);}
+function closeInspector(){
+  document.getElementById('app').classList.remove('insp-open');
+  selectedNode=null;neighborSet.clear();hoveredNode=null;
+  if(renderer)renderer.refresh();
+  setTimeout(()=>renderer&&renderer.refresh(),100);
+}
+function switchTab(tab){
+  activeTab=tab;
+  document.querySelectorAll('.itab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+  document.getElementById('tab-code').style.display=tab==='code'?'':'none';
+  document.getElementById('tab-info').style.display=tab==='info'?'':'none';
+}
+
+// Syntax highlighting
+function highlight(code){
+  let out=code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const ph={};let i=0;
+  const mkph=s=>{const k='\x00'+(i++)+'\x00';ph[k]=s;return k;};
+  out=out.replace(/(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)/g,m=>mkph(`<span class="hl-cmt">${m}</span>`));
+  out=out.replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g,m=>mkph(`<span class="hl-str">${m}</span>`));
+  out=out.replace(/\b(\d+\.?\d*)\b/g,m=>mkph(`<span class="hl-num">${m}</span>`));
+  out=out.replace(/\b([A-Z][A-Za-z0-9_]*)\b/g,m=>mkph(`<span class="hl-dec">${m}</span>`));
+  out=out.replace(/\b(def|class|import|from|return|if|else|elif|for|while|async|await|yield|with|as|pass|try|except|finally|raise|in|not|and|or|is|None|True|False|func|var|const|let|export|default|new|this|super|type|interface|struct|enum|go|defer|chan|select|case|break|continue|switch|package|pub|fn|mut|use|mod|self|impl|where|match|true|false|null|undefined|void|int|str|bool|float|any)\b/g,m=>mkph(`<span class="hl-kw">${m}</span>`));
+  for(const[k,v]of Object.entries(ph))out=out.replaceAll(k,v);
+  return out;
+}
+
+function showFileContent(relPath,focusLine){
+  openInspector();switchTab('code');
+  document.getElementById('insp-title').textContent=relPath.split('/').pop();
+  isolateByFile(relPath);
+  fetch('/api/file?path='+encodeURIComponent(relPath)).then(r=>r.json()).then(data=>{
+    if(data.error){document.getElementById('tab-code').innerHTML=`<div style="padding:14px;color:#f87171">${data.error}</div>`;return;}
+    const lines=data.content.split('\n');
+    const gutter=lines.map((_,i)=>`<div id="ln${i+1}">${i+1}</div>`).join('');
+    document.getElementById('tab-code').innerHTML=
+      `<div class="code-wrap"><div class="gutter">${gutter}</div><div class="code">${highlight(data.content)}</div></div>`+
+      (data.symbols&&data.symbols.length?`<div class="sym-list">${data.symbols.map(s=>
+        `<div class="sym-row" onclick='symClick(${JSON.stringify(s.id)},${s.line},${JSON.stringify(relPath)})'>
+          <span class="kb k${s.kind}">${KIND_GLYPH[s.kind]||'?'}</span>
+          <span>${s.name}</span>
+          <span class="sym-ln">:${s.line}</span>
+        </div>`).join('')}</div>`:'');
+    if(focusLine)setTimeout(()=>scrollCodeTo(focusLine),80);
+  });
+}
+function scrollCodeTo(ln){const el=document.getElementById('ln'+ln);if(el)el.scrollIntoView({block:'center',behavior:'smooth'});}
+function symClick(id,line,path){
+  scrollCodeTo(line);
+  if(id&&sigmaGraph&&sigmaGraph.hasNode(id))selectNode(id,{isolate:true,keepFile:path});
+}
+
+function showNodeDetail(id){
+  openInspector();switchTab('info');
+  document.getElementById('insp-title').textContent='…';
+  fetch('/api/node?uid='+encodeURIComponent(id)).then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('tab-info').innerHTML=`<div style="padding:14px;color:#f87171">${d.error}</div>`;return;}
+    document.getElementById('insp-title').textContent=d.name||id;
+    document.getElementById('tab-info').innerHTML=`
+      <div class="node-info">
+        <div class="ni-name">${d.name}</div>
+        <div class="ni-meta">${d.kind} · <span style="font-family:ui-monospace,monospace">${d.file||''}</span>${d.line?'<br>line '+d.line:''}</div>
+        ${d.source?`<div class="ni-sec"><div class="ni-sec-title">Source</div><div class="code-snip"><pre>${highlight(d.source)}</pre></div></div>`:''}
+        ${d.callers&&d.callers.length?`<div class="ni-sec"><div class="ni-sec-title">Callers (${d.callers.length})</div>${d.callers.map(c=>
+          `<div class="ni-item" onclick='selectNode(${JSON.stringify(c.id)})'>
+            <span class="kb kFunction">ƒ</span><span>${c.name}</span>
+            <span class="ni-file">${c.file}:${c.line}</span>
+          </div>`).join('')}</div>`:''}
+        ${d.callees&&d.callees.length?`<div class="ni-sec"><div class="ni-sec-title">Callees (${d.callees.length})</div>${d.callees.map(c=>
+          `<div class="ni-item" onclick='selectNode(${JSON.stringify(c.id)})'>
+            <span class="kb kFunction">ƒ</span><span>${c.name}</span>
+            <span class="ni-file">${c.file}:${c.line}</span>
+          </div>`).join('')}</div>`:''}
+      </div>`;
+  });
+}
+
+// File tree
+function buildTree(files){
+  const root={};
+  for(const f of files){
+    const parts=f.path.split('/');let node=root;
+    for(let i=0;i<parts.length-1;i++){node[parts[i]]=node[parts[i]]||{};node=node[parts[i]];}
+    node[parts[parts.length-1]]={__file:f};
+  }
+  return root;
+}
+// Path registry: maps encoded key → actual path (avoids inline quoting issues)
+const FILE_PATHS = {};
+let _fpIdx = 0;
+function regPath(p){ const k='fp'+(++_fpIdx); FILE_PATHS[k]=p; return k; }
+
+function renderTree(node,depth){
+  let html='';
+  const entries=Object.entries(node).sort(([a,av],[b,bv])=>{
+    const af=!!av.__file,bf=!!bv.__file;
+    return af!==bf?(af?1:-1):a.localeCompare(b);
+  });
+  for(const[name,val]of entries){
+    if(val.__file){
+      const f=val.__file;
+      const k=regPath(f.path);
+      html+=`<div class="file-row" data-fpk="${k}">
+        <span style="color:var(--file);font-size:10px">▪</span>
+        <span>${name}</span>
+        ${f.symbols>0?`<span class="sym-ct">${f.symbols}</span>`:''}
+      </div>`;
+    }else{
+      html+=`<div class="dir-row">
+        <span class="arrow">▶</span>
+        <span style="color:var(--text3);font-size:10px">▸</span>
+        <span>${name}</span>
+      </div><div class="dir-children">${renderTree(val,depth+1)}</div>`;
+    }
+  }
+  return html;
+}
+
+// Event delegation for tree clicks
+document.getElementById('tree-wrap').addEventListener('click', e => {
+  const fileRow = e.target.closest('.file-row');
+  if(fileRow){
+    const k = fileRow.dataset.fpk;
+    if(k && FILE_PATHS[k]) showFileContent(FILE_PATHS[k]);
+    return;
+  }
+  const dirRow = e.target.closest('.dir-row');
+  if(dirRow) dirRow.classList.toggle('open');
+});
+
+// Search
+let searchTimer=null;
+document.getElementById('search').addEventListener('input',e=>{
+  clearTimeout(searchTimer);
+  const q=e.target.value.trim();
+  const box=document.getElementById('search-results');
+  if(!q){box.classList.remove('show');box.innerHTML='';return;}
+  searchTimer=setTimeout(()=>{
+    fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(results=>{
+      if(!results.length){box.classList.remove('show');return;}
+      box.innerHTML=results.map(r=>
+        `<div class="sr-item" onclick='srClick(${JSON.stringify(r.id)},${JSON.stringify(r.file)})'>
+          <span class="kb k${r.kind}">${KIND_GLYPH[r.kind]||'?'}</span>
+          <span>${r.name}</span>
+          <span style="color:var(--text3);font-size:11px;margin-left:auto">${r.file}</span>
+        </div>`).join('');
+      box.classList.add('show');
+    });
+  },200);
+});
+document.getElementById('search').addEventListener('blur',()=>setTimeout(()=>document.getElementById('search-results').classList.remove('show'),200));
+function srClick(id,file){
+  document.getElementById('search-results').classList.remove('show');
+  document.getElementById('search').value='';
+  if(id&&sigmaGraph&&sigmaGraph.hasNode(id))selectNode(id,{isolate:true});
+  else if(file)showFileContent(file);
+}
+
+// Entry points
+document.getElementById('ep-toggle').addEventListener('click',async()=>{
+  epOn=!epOn;
+  document.getElementById('ep-toggle').classList.toggle('on',epOn);
+  if(epOn&&!EP_DATA){EP_DATA=await fetch('/api/entrypoints').then(r=>r.json());epHighlight=new Set(EP_DATA.map(e=>e.id).filter(Boolean));}
+  if(!epOn)epHighlight.clear();
+  if(renderer)renderer.refresh();
+});
+
+// Layout buttons
+document.querySelectorAll('.lbtn').forEach(b=>b.addEventListener('click',()=>applyLayout(b.dataset.mode)));
+document.getElementById('insp-close').addEventListener('click',closeInspector);
+document.querySelectorAll('.itab').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
+
+// Main
+async function main(){
+  document.getElementById('loading-txt').textContent='Loading graph data…';
+  const[graphData,treeData]=await Promise.all([
+    fetch('/api/graph').then(r=>r.json()),
+    fetch('/api/tree').then(r=>r.json()),
+  ]);
+  GRAPH=graphData;
+  const s=graphData.stats;
+  const kinds=Object.entries(s.nodes_by_kind||{}).filter(([,v])=>v>0).map(([k,v])=>`${v} ${k}`).join(' · ');
+  document.getElementById('stats-bar').innerHTML=
+    `${s.nodes} nodes · ${s.edges} edges${s.truncated?' (top-indegree)':''}`+
+    (kinds?`<br><span style="color:var(--text3)">${kinds}</span>`:'');
+
+  if(treeData.files&&treeData.files.length){
+    const tree=buildTree(treeData.files);
+    document.getElementById('tree-wrap').innerHTML=renderTree(tree,0);
+  }
+
+  document.getElementById('loading-txt').textContent='Building graph…';
+  sigmaGraph=buildSigmaGraph(graphData);
+  // Wait one frame so CSS grid has applied and #sigma-container has a real width
+  requestAnimationFrame(()=>{
+    initSigma(sigmaGraph);
+    document.getElementById('loading').style.display='none';
+    startFA2();
+  });
+}
+main().catch(e=>{document.getElementById('loading-txt').textContent='Error: '+e.message;});
+</script>

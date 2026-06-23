@@ -967,6 +967,29 @@ def serve(repo_path: str | None) -> None:
     start_server(repo)
 
 
+@main.command("serve-web")
+@click.argument("repo_path", default=".", type=click.Path(exists=True, file_okay=False))
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host.")
+@click.option("--port", default=4747, show_default=True, type=int, help="Bind port.")
+@click.option("--open/--no-open", "open_browser", default=True, show_default=True,
+              help="Open the visualizer in your browser.")
+def serve_web(repo_path: str, host: str, port: int, open_browser: bool) -> None:
+    """Launch the browser-based code-graph visualizer for an indexed repo.
+
+    Serves an interactive force-graph of the call graph plus a file sidebar,
+    search, and per-symbol caller/callee navigation. Reads the pre-built
+    .orgraph/graph.kuzu — run `orgraph index` first.
+    """
+    from orgraph.web import serve as serve_web_impl
+
+    repo = Path(repo_path).resolve()
+    if open_browser:
+        import threading
+        import webbrowser
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
+    serve_web_impl(repo, host=host, port=port)
+
+
 @main.command()
 @click.argument("repo_path", default=".", type=click.Path(file_okay=False))
 def install(repo_path: str) -> None:
