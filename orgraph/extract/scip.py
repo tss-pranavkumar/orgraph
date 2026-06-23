@@ -583,6 +583,10 @@ def _parse_scip(
     uid_map: dict[str, str] = {}     # scip symbol → uid
     label_of: dict[str, str] = {}    # scip symbol → label
     sym_def_path: dict[str, str] = {}   # scip symbol → defining file abs path (any defined symbol)
+    # (short_name, abs_path) → uid for Function nodes only — used by star-import fallback in Pass 2
+    name_path_index: dict[tuple[str, str], str] = {}
+    # (method_uid, class_scip_sym) pairs — flushed to CONTAINS edges after Pass 1
+    method_class_pairs: list[tuple[str, str]] = []
 
     # ── Pass 1: definitions → nodes ────────────────────────────────────────────
     for doc in index.documents:
@@ -606,6 +610,11 @@ def _parse_scip(
                 if label is None:
                     continue
             line_no = (occ.range[0] + 1) if occ.range else 0
+
+            # Use enclosing_range to get the real function/class body end line.
+            er = list(getattr(occ, "enclosing_range", []))
+            end_line = (er[2] + 1) if len(er) >= 3 else line_no
+
             name = _name_from_symbol(sym)
 
             # Qualify methods as ClassName.method (matches tree-sitter naming) and
@@ -617,6 +626,11 @@ def _parse_scip(
                 if name.rsplit(".", 1)[-1] in _FALCON_HTTP:
                     http_method = _FALCON_HTTP[name.rsplit(".", 1)[-1]]
                     http_path = routes.get(class_name, "")
+                # Derive the class SCIP symbol so we can emit a CONTAINS edge.
+                # Method sym ends with "ClassName#method()."; class sym ends with "ClassName#".
+                hash_pos = sym.rfind("#")
+                if hash_pos != -1:
+                    method_class_pairs.append((make_uid(name, abs_path, line_no), sym[:hash_pos + 1]))
             elif label == "Function" and lang in ("typescript", "javascript"):
                 if name in fastify_routes:
                     http_method, http_path = fastify_routes[name]
@@ -628,16 +642,28 @@ def _parse_scip(
             uid = make_uid(name, abs_path, line_no)
             uid_map[sym] = uid
             label_of[sym] = label
+            if label == "Function":
+                short_name = name.rsplit(".", 1)[-1]  # strip ClassName. prefix for methods
+                name_path_index[(short_name, abs_path)] = uid
             nodes.append({
                 "uid": uid, "label": label, "name": name, "path": abs_path,
-                "line_number": line_no, "end_line": line_no, "lang": lang,
+                "line_number": line_no, "end_line": end_line, "lang": lang,
                 "source": src[line_no - 1].strip() if 0 < line_no <= len(src) else "",
                 "docstring": "", "is_dependency": False, "confidence": "EXTRACTED",
                 "http_method": http_method, "http_path": http_path,
             })
 
-    # ── Pass 2: references → CALLS edges (caller via enclosing_range) ───────────
+    # ── Pass 1b: Class→Function CONTAINS edges ─────────────────────────────────
     edges: list[EdgeDict] = []
+    for method_uid, class_sym in method_class_pairs:
+        class_uid = uid_map.get(class_sym)
+        if class_uid and class_uid != method_uid:
+            edges.append({
+                "source_uid": class_uid, "target_uid": method_uid,
+                "relation": "CONTAINS", "confidence": "EXTRACTED", "line_number": 0,
+            })
+
+    # ── Pass 2: references → CALLS edges (caller via enclosing_range) ───────────
     seen: set[tuple[str, str, int]] = set()
     for doc in index.documents:
         def_occs = [
@@ -651,7 +677,23 @@ def _parse_scip(
             if sym.startswith("local ") or _is_definition(occ):
                 continue
             dst_uid = uid_map.get(sym)
-            if not dst_uid or label_of.get(sym) != "Function":
+            if dst_uid is None:
+                # Star-import fallback: SCIP resolves `fetchOne` (imported via
+                # `from module import *`) to the module namespace symbol (ends with
+                # `/`). Extract the call token from source and look it up by
+                # (name, file) in name_path_index (Function nodes only).
+                if sym.endswith("/"):
+                    def_path = sym_def_path.get(sym)
+                    if def_path:
+                        r_tmp = list(occ.range)
+                        if r_tmp and r_tmp[0] < len(src):
+                            col_s = r_tmp[1] if len(r_tmp) > 1 else 0
+                            col_e = r_tmp[3] if len(r_tmp) >= 4 else (r_tmp[2] if len(r_tmp) >= 3 else col_s)
+                            token = src[r_tmp[0]][col_s:col_e].strip()
+                            dst_uid = name_path_index.get((token, def_path))
+                if not dst_uid:
+                    continue
+            elif label_of.get(sym) != "Function":
                 continue  # only edges to known functions/methods are calls
             r = list(occ.range)
             if not r:
